@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Plain CLI for CSV bulk downloads (uses csvdl_core).
+krdl-dl v1: Direct krdl.moe scraping and downloading.
 """
 import argparse
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-from csvdl_core import expand, extract_urls_from_text, prepare_jobs, download_queue, login_to_krdl
+from csvdl_core import expand, scrape_krdl_page, prepare_jobs, download_queue, login_to_krdl
 
 # Load environment variables from .env file
 load_dotenv()
 
 def main():
-    ap = argparse.ArgumentParser(description="CSV Bulk Downloader — CLI")
-    ap.add_argument("--csv", required=True, help="Path to CSV/text file with URLs")
+    ap = argparse.ArgumentParser(description="krdl-dl v1 — Direct krdl.moe scraping")
+    ap.add_argument("--url", required=True, help="krdl.moe page URL to scrape (e.g., https://krdl.moe/show/kyouryuu-sentai-zyuranger)")
     ap.add_argument("--target", required=True, help="Directory to save downloads")
     ap.add_argument("--ext", choices=["mkv", "mp4"], default="mkv", help="Which extension to download (default: mkv)")
     ap.add_argument("-j", "--jobs", type=int, default=2, help="Max concurrent downloads (default: 2)")
@@ -42,20 +42,23 @@ def main():
     else:
         print("⚠️  No credentials provided - trying without authentication...")
     
-    print(f"Extracting URLs from {args.csv}...")
-    urls = extract_urls_from_text(args.csv)
-    print(f"Found {len(urls)} URLs")
+    print(f"🌐 Scraping krdl.moe page: {args.url}")
+    urls = scrape_krdl_page(args.url, auth_cookies)
     
-    print(f"Preparing jobs for {args.ext} files...")
+    if not urls:
+        print("❌ No download links found on the page")
+        return
+    
+    print(f"📁 Preparing jobs for {args.ext} files...")
     jobs = prepare_jobs(urls, args.ext, target_dir, auth_cookies)
     
     queued_jobs = [j for j in jobs if j.status == "QUEUED"]
     skipped_jobs = [j for j in jobs if j.status == "SKIP"]
     
-    print(f"Jobs: {len(queued_jobs)} to download, {len(skipped_jobs)} already exist")
+    print(f"📊 Jobs: {len(queued_jobs)} to download, {len(skipped_jobs)} already exist")
     
     if not queued_jobs:
-        print("No new downloads needed.")
+        print("✅ No new downloads needed.")
         return
     
     # Use the new queue system with proper concurrency control
