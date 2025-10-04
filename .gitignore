@@ -46,10 +46,12 @@ Thumbs.db
 
 # Project specific
 test_downloads/
+test_downloads_selenium/
 *.csv
 downloads/
 *.mkv
 *.mp4
+*.crdownload
 
 # Testing
 .pytest_cache/
