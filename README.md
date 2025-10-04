@@ -1,183 +1,266 @@
 # krdl-dl
 
-A Python application for bulk downloading video files from krdl.moe, with both CLI and TUI interfaces. Currently supports CSV-based downloads with plans for direct site scraping in v1.
+A Selenium-based automated downloader for krdl.moe (tokusatsu media archive). Download complete series with proper authentication, rate limiting, and queue management.
 
-## Current Features (MVP)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-- **CSV-Based Downloads**: Extract URLs from user-generated CSV files and download them in parallel
-- **Video File Filtering**: Filter downloads by video file extension (mkv, mp4)
-- **Resume Support**: Automatically resume interrupted downloads using curl's `-C -` flag
-- **Progress Tracking**: Real-time progress updates based on file size vs expected content length
-- **Dual Interface**: Both command-line (CLI) and text-based user interface (TUI) options
-- **Concurrent Downloads**: Configurable parallelism for faster downloads
-- **Smart Filename Inference**: Automatically infer filenames from Content-Disposition headers, redirects, or URL paths
-- **Skip Existing**: Automatically skip files that already exist
+## ✨ Features
 
-## Planned Features (v1)
+- 🔐 **Authenticated Downloads**: Secure login with krdl.moe credentials
+- 🌐 **Direct Site Scraping**: Automatically extracts all download links from show pages
+- 📊 **Smart Pagination**: Handles "Show All" to get complete episode lists (50+ episodes)
+- 🎯 **Extension Filtering**: Download only MKV or MP4 files
+- ⚡ **Queue Management**: Respects site's 2-concurrent download limit
+- 🔄 **Duplicate Detection**: Skips existing files automatically
+- 📈 **Progress Monitoring**: Real-time download status tracking
+- 🛡️ **Rate Limit Handling**: Gracefully stops on rate limit detection
+- 🧪 **Testing Support**: `--limit` flag for testing without full downloads
 
-- **Direct Site Scraping**: Automatically scrape krdl.moe pages to extract video download links
-- **Table-Based Link Extraction**: Parse structured table data from krdl.moe pages for video files
-- **Simplified Interface**: Just provide target directory, optional video file type override, and krdl.moe URL
-- **Automatic CSV Generation**: Generate CSV internally from scraped video links
-- **Enhanced Link Detection**: Specialized parsing for krdl.moe's video file structure
+## 📚 Documentation
 
-## Installation
+### Quick Links
 
-1. Clone or download the project files
-2. Create a virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+- **[Quickstart Guide](docs/quickstart.md)** - Get started in 5 minutes
+- **[Architecture & Design](docs/architecture.md)** - How it works and why
+- **[Tech Stack](docs/tech-stack.md)** - Dependencies and tools
+- **[Contributing Guide](CONTRIBUTING.md)** - How to contribute
 
-## Usage
+## 🚀 Quick Start
 
-### Current Usage (MVP - CSV Required)
-
-#### TUI (Recommended)
-
-The TUI provides a visual interface with progress bars and status updates:
+### Installation
 
 ```bash
-python3 csvdl_tui.py \
-  --csv "/path/to/your/krdl_urls.csv" \
-  --target "/path/to/download/directory" \
+# Clone the repository
+git clone https://github.com/DouglasMacKrell/krdl-dl.git
+cd krdl-dl
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up credentials
+echo "KRDL_USERNAME=your_email@example.com" > .env
+echo "KRDL_PASSWORD=your_password" >> .env
+```
+
+### Basic Usage
+
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/kyouryuu-sentai-zyuranger" \
+  --target "/path/to/downloads" \
+  --ext mkv
+```
+
+## 📖 Usage Examples
+
+### Download a Complete Series
+
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/kyouryuu-sentai-zyuranger" \
+  --target "~/Downloads/Super Sentai/Season 16" \
+  --ext mkv
+```
+
+### Download Only MP4 Files
+
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/choujin-sentai-jetman" \
+  --target "~/Downloads/Super Sentai/Season 15" \
+  --ext mp4
+```
+
+### Test with Limited Downloads
+
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/kyouryuu-sentai-zyuranger" \
+  --target "~/Downloads/test" \
   --ext mkv \
-  -j 2
+  --limit 3
 ```
 
-**TUI Controls:**
-- `Enter` = Start downloads
-- `P` = Pause (stops after current downloads finish)
-- `Q` = Quit
-
-#### CLI (Command Line)
-
-For scripted or automated usage:
+### Use Headless Mode
 
 ```bash
-python3 csvdl.py \
-  --csv "/path/to/your/krdl_urls.csv" \
-  --target "/path/to/download/directory" \
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/kyouryuu-sentai-zyuranger" \
+  --target "~/Downloads/Super Sentai/Season 16" \
   --ext mkv \
-  -j 2
+  --headless
 ```
 
-#### Parameters
+## 🎮 Command-Line Arguments
 
-- `--csv`: Path to CSV/text file containing krdl.moe URLs
-- `--target`: Directory to save downloaded files
-- `--ext`: Video file extension to download (mkv, mp4)
-- `-j, --jobs`: Number of concurrent downloads (default: 2)
+| Argument | Required | Description | Default |
+|----------|----------|-------------|---------|
+| `--url` | ✅ | URL of the krdl.moe show page | - |
+| `--target` | ✅ | Directory to save downloads | - |
+| `--ext` | ❌ | File extension (`mkv` or `mp4`) | `mkv` |
+| `--limit` | ❌ | Limit number of downloads (testing) | None |
+| `--username` | ❌ | krdl.moe username (overrides .env) | From .env |
+| `--password` | ❌ | krdl.moe password (overrides .env) | From .env |
+| `--headless` | ❌ | Run browser in headless mode | False |
 
-### Planned Usage (v1 - Direct Site Scraping)
+## ⚙️ How It Works
+
+1. **🔐 Login**: Authenticates with krdl.moe using Selenium
+2. **🌐 Navigate**: Goes to the show page
+3. **📊 Paginate**: Clicks "All" to show all episodes (not just 25)
+4. **🔍 Scrape**: Extracts download links from tables
+5. **🎯 Filter**: Keeps only your chosen extension (mkv/mp4)
+6. **✅ Dedupe**: Checks target directory, skips existing files
+7. **⚡ Queue**: Downloads 2 files concurrently (respects site limits)
+8. **📈 Monitor**: Tracks `.crdownload` files for completion
+9. **✨ Complete**: Files appear in your target directory
+
+## ⚠️ Important Notes
+
+### Rate Limiting
+
+krdl.moe enforces strict limits for free users:
+
+- **400kbps** per file download speed
+- **2 concurrent downloads** maximum
+- **~5 minutes** per episode (typical size)
+
+**The downloader automatically respects these limits!**
+
+### What Happens on Rate Limit
+
+If you exceed limits, krdl.moe redirects to `/premium` or `/register`:
+
+```
+🚨 RATE LIMIT DETECTED - STOPPING DOWNLOADS
+⏰ Wait 15 minutes before retrying
+```
+
+The downloader gracefully stops to protect your account.
+
+## 📦 Requirements
+
+- **Python 3.8+**
+- **Google Chrome** (latest version)
+- **krdl.moe account** (free or premium)
+- **~500MB disk space** for dependencies
+- **Internet connection**
+
+## 🧪 Testing
 
 ```bash
-# Future v1 interface - direct krdl.moe URL
-python3 krdl_dl.py \
-  --url "https://krdl.moe/series/super-sentai" \
-  --target "/path/to/download/directory" \
-  --ext mkv \
-  -j 2
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=. --cov-report=html
+
+# Run specific test
+pytest tests/test_core.py::test_login_success
 ```
 
-## CSV Format (Current MVP)
-
-The CSV file should contain krdl.moe video URLs, one per line or separated by commas. The application will automatically extract HTTP/HTTPS URLs from the text:
+## 🏗️ Project Structure
 
 ```
-https://krdl.moe/download/series1-episode1.mkv
-https://krdl.moe/download/series1-episode2.mkv
-https://krdl.moe/download/series1-episode3.mp4
+krdl-dl/
+├── krdl_selenium.py      # Main Selenium downloader
+├── csvdl_core.py         # Shared utilities (Job, login, etc.)
+├── requirements.txt      # Python dependencies
+├── .env                  # Credentials (gitignored)
+├── docs/                 # Documentation
+│   ├── quickstart.md
+│   ├── architecture.md
+│   └── tech-stack.md
+├── tests/                # Test suite
+│   ├── test_core.py
+│   ├── test_integration.py
+│   └── test_edge_cases.py
+├── CONTRIBUTING.md       # Contribution guidelines
+├── LICENSE               # MIT License
+└── README.md             # This file
 ```
 
-**Note**: In v1, this CSV generation will be automated by scraping the krdl.moe page directly for video files.
+## 🛠️ Tech Stack
 
-## Testing
+- **[Selenium](https://www.selenium.dev/)** - Browser automation
+- **[webdriver-manager](https://github.com/SergeyPirogov/webdriver_manager)** - ChromeDriver management
+- **[BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/)** - HTML parsing
+- **[requests](https://requests.readthedocs.io/)** - HTTP client
+- **[python-dotenv](https://github.com/theskumar/python-dotenv)** - Environment variables
+- **[pytest](https://pytest.org/)** - Testing framework
 
-The project includes comprehensive tests covering:
+See [Tech Stack Documentation](docs/tech-stack.md) for details.
 
-- **Unit Tests**: Core functionality, URL extraction, filename inference, job preparation
-- **Integration Tests**: End-to-end CLI and TUI functionality
-- **Edge Case Tests**: Error handling, network failures, malformed URLs, empty files
+## 🗺️ Roadmap
 
-Run tests with:
-```bash
-python -m pytest tests/ -v
-```
+### Current (v1.0)
 
-### Test Coverage
+- ✅ Selenium-based downloader
+- ✅ Authentication & session management
+- ✅ Direct site scraping
+- ✅ Queue management
+- ✅ Rate limit handling
+- ✅ Comprehensive documentation
 
-- ✅ URL extraction from various text formats
-- ✅ File extension matching and filtering
-- ✅ Filename inference from headers, redirects, and URLs
-- ✅ Job preparation and status management
-- ✅ Download execution with progress tracking
-- ✅ Error handling and network failure scenarios
-- ✅ Concurrent download management
-- ✅ Resume functionality for interrupted downloads
-- ✅ Skip existing files
-- ✅ CLI and TUI interface testing
+### Planned (v1.1)
 
-## Architecture
+- 🔲 Modern TUI with real-time progress
+- 🔲 Pre-commit hooks
+- 🔲 CI/CD pipeline (GitHub Actions)
+- 🔲 Comprehensive test suite
+- 🔲 Multi-OS testing (Linux, macOS, Windows)
 
-### Core Components
+### Future (v2.0)
 
-1. **`csvdl_core.py`**: Core download logic and utilities
-   - URL extraction and filtering
-   - Filename inference
-   - Job management
-   - Download execution with curl
+- 🔲 Resume capability (save/restore state)
+- 🔲 Batch processing (multiple series)
+- 🔲 Smart retry with exponential backoff
+- 🔲 Bandwidth monitoring
+- 🔲 Download scheduling
 
-2. **`csvdl_tui.py`**: Textual-based TUI interface
-   - Visual progress tracking
-   - Interactive controls
-   - Real-time status updates
+## 🤝 Contributing
 
-3. **`csvdl.py`**: Command-line interface
-   - Simple CLI for automation
-   - Progress reporting
-   - Batch processing
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
-### Key Features
+### Quick Contribution Steps
 
-- **Resume Support**: Uses curl's `-C -` flag to resume partial downloads
-- **Progress Tracking**: Monitors file size on disk vs expected Content-Length
-- **Smart Filtering**: Filters URLs by extension and normalizes filenames
-- **Concurrent Downloads**: Configurable parallelism with asyncio
-- **Error Handling**: Graceful handling of network errors and timeouts
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes
+4. Run tests (`pytest`)
+5. Commit your changes (`git commit -m 'feat: add amazing feature'`)
+6. Push to the branch (`git push origin feature/amazing-feature`)
+7. Open a Pull Request
 
-## Dependencies
+## 📝 License
 
-- `textual>=0.58`: TUI framework
-- `rich>=13.7`: Rich text and progress display
-- `pytest>=7.0.0`: Testing framework
-- `pytest-asyncio>=0.21.0`: Async testing support
-- `pytest-mock>=3.10.0`: Mocking utilities
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Notes
+## 🙏 Acknowledgments
 
-- Resume support is handled by curl's `-C -` flag; partial files are reused
-- Filename inference handles `/mkv` path style and normalizes `.mkv/.mp4`
-- If you prefer to avoid curl dependency, the code can be migrated to aiohttp for pure-Python streaming
-- The application follows redirects and retries failed downloads automatically
+- **krdl.moe** - For providing an amazing tokusatsu archive
+- **Selenium** - For making browser automation possible
+- **Python Community** - For excellent libraries and tools
 
-## Development Roadmap
+## 📧 Support
 
-### v1 (Next Release)
-- **Direct krdl.moe Scraping**: Parse krdl.moe pages to extract download links automatically
-- **Table Structure Parsing**: Handle krdl.moe's specific table layout for link extraction
-- **Simplified Interface**: Just provide target directory, optional file type, and krdl.moe URL
-- **Automatic CSV Generation**: Generate CSV internally from scraped links
-- **Enhanced Link Detection**: Specialized parsing for krdl.moe's page structure
+- **Issues**: [GitHub Issues](https://github.com/DouglasMacKrell/krdl-dl/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/DouglasMacKrell/krdl-dl/discussions)
+- **Email**: [Your email if you want to provide it]
 
-### Future Enhancements
-- Parallelism throttle control from within the TUI
-- Per-file error logs and "retry failed" action
-- pyproject.toml for pipx installation as a global tool
-- Pure Python download implementation (aiohttp) as an alternative to curl
-- Support for other similar sites with table-based link structures
+## ⚖️ Legal
+
+This tool is for **personal use only**. Please respect krdl.moe's terms of service and rate limits. Do not use this tool to:
+
+- Redistribute downloaded content
+- Circumvent premium membership benefits
+- Overload the site's servers
+- Violate copyright laws
+
+**Use responsibly and support the creators!** 🎬
