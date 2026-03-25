@@ -497,44 +497,84 @@ class KrdlSeleniumDownloader:
         
         print(f"🎉 All downloads completed!")
         return completed_jobs
-    
-    def _is_download_finished(self, download_info: dict) -> bool:
-        """Check if a download has finished by monitoring for .crdownload files in target directory"""
+
+    def _saved_file_path(self, filename: str):
+        """Path to the finished video if it exists (exact path or same basename, case-insensitive)."""
+        p = self.target_dir / filename
         try:
-            # Chrome downloads directly to target directory
-            expected_file = self.target_dir / download_info['filename']
-            temp_file = self.target_dir / f"{download_info['filename']}.crdownload"
-            
-            # Check if final file exists (download complete)
-            if expected_file.exists():
-                file_size = expected_file.stat().st_size
-                if 'completed' not in download_info:
-                    download_info['completed'] = True
-                    print(f"✅ Download complete: {download_info['filename']} ({file_size:,} bytes)")
-                return True
-            
-            # Check if .crdownload file exists (download in progress)
-            if temp_file.exists():
-                current_size = temp_file.stat().st_size
-                
-                # Track progress
-                if 'last_size' not in download_info:
-                    download_info['last_size'] = current_size
-                    print(f"🔍 Download started: {download_info['filename']}")
-                elif current_size != download_info['last_size']:
-                    download_info['last_size'] = current_size
-                    print(f"🔍 Downloading: {download_info['filename']} ({current_size:,} bytes)")
-                
-                # Still downloading
+            if p.is_file():
+                return p
+        except OSError:
+            pass
+        want = filename.lower()
+        try:
+            for f in self.target_dir.iterdir():
+                if f.is_file() and f.name.lower() == want:
+                    return f
+        except OSError:
+            pass
+        return None
+
+    def _named_partial_path(self, filename: str):
+        """Chrome partial `filename.crdownload` if present (case-insensitive basename)."""
+        t = self.target_dir / f"{filename}.crdownload"
+        try:
+            if t.is_file():
+                return t
+        except OSError:
+            pass
+        want = f"{filename}.crdownload".lower()
+        try:
+            for f in self.target_dir.iterdir():
+                if f.is_file() and f.name.lower() == want:
+                    return f
+        except OSError:
+            pass
+        return None
+
+    def _notify_saved_complete(self, download_info: dict, saved: Path, fn: str) -> bool:
+        file_size = saved.stat().st_size
+        if "completed" not in download_info:
+            download_info["completed"] = True
+            if saved.name != fn:
+                print(f"✅ Download complete: {fn} ({file_size:,} bytes) [on disk: {saved.name}]")
+            else:
+                print(f"✅ Download complete: {fn} ({file_size:,} bytes)")
+        return True
+
+    def _is_download_finished(self, download_info: dict) -> bool:
+        """
+        Complete when the expected file exists in the target directory (case-insensitive name).
+        While `filename.crdownload` exists, treat as still downloading (data may be streaming).
+        If there is no such partial, look at the folder again — we do not wait on Chrome alone.
+        """
+        try:
+            fn = download_info["filename"]
+            saved = self._saved_file_path(fn)
+            if saved is not None:
+                return self._notify_saved_complete(download_info, saved, fn)
+
+            partial = self._named_partial_path(fn)
+            if partial is not None:
+                current_size = partial.stat().st_size
+                if "last_size" not in download_info:
+                    download_info["last_size"] = current_size
+                    print(f"🔍 Download started: {fn} (partial: {partial.name})")
+                elif current_size != download_info["last_size"]:
+                    download_info["last_size"] = current_size
+                    print(f"🔍 Downloading: {fn} ({current_size:,} bytes)")
                 return False
-            
-            # No .crdownload and no final file yet - waiting for download to start
-            if 'waiting' not in download_info:
-                download_info['waiting'] = True
-                print(f"⏳ Waiting for download to start: {download_info['filename']}")
-            
+
+            saved = self._saved_file_path(fn)
+            if saved is not None:
+                return self._notify_saved_complete(download_info, saved, fn)
+
+            if "waiting" not in download_info:
+                download_info["waiting"] = True
+                print(f"⏳ Waiting for download to start: {fn}")
+
             return False
-            
+
         except Exception as e:
             print(f"⚠️  Error checking download status: {e}")
             return False
