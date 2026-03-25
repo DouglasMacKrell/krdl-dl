@@ -182,11 +182,10 @@ def prepare_jobs(
     auth_cookies: Optional[str] = None
 ) -> List[Job]:
     """
-    Prepare Job objects from URLs, filtering by extension.
-    Checks for existing files and marks them as SKIP.
-    
-    Note: This is a simplified version for Selenium-based downloads.
-    Filename inference is handled by the browser.
+    Prepare Job objects from URLs, keeping only those whose URL matches the given extension
+    (path ending in ``/{ext}`` or ``.{ext}``).
+
+    Note: Selenium flow uses table-derived filenames separately; this helper is for URL lists.
     """
     jobs: List[Job] = []
     
