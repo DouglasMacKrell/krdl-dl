@@ -27,6 +27,7 @@ A Selenium-based automated downloader for krdl.moe (tokusatsu media archive). Do
 - **[Architecture & Design](docs/architecture.md)** - How it works and why
 - **[Tech Stack](docs/tech-stack.md)** - Dependencies and tools
 - **[Contributing Guide](CONTRIBUTING.md)** - How to contribute
+- **[Changelog](CHANGELOG.md)** - Release history
 
 ## 🚀 Quick Start
 
@@ -211,7 +212,7 @@ See [Tech Stack Documentation](docs/tech-stack.md) for details.
 
 ## 🗺️ Roadmap
 
-### Current (v1.0)
+### Current (v1.0) — **[v1.0.0](https://github.com/DouglasMacKrell/krdl-dl/releases/tag/v1.0.0)**
 
 - ✅ Selenium-based downloader
 - ✅ Authentication & session management
