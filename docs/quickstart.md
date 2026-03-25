@@ -28,7 +28,7 @@ Get up and running with krdl-dl in under 5 minutes!
    ```
 
 4. **Set up your credentials:**
-   
+
    Create a `.env` file in the project root:
    ```bash
    KRDL_USERNAME=your_email@example.com

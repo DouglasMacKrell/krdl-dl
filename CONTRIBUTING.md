@@ -37,7 +37,7 @@ We are committed to providing a welcoming and inclusive environment for all cont
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.9 or higher
 - Git
 - Google Chrome
 - GitHub account
@@ -75,8 +75,11 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 # Install production dependencies
 pip install -r requirements.txt
 
-# Install development dependencies
-pip install pytest pytest-asyncio pytest-mock black flake8 mypy
+# Install development dependencies (pytest, pre-commit, Ruff, …)
+pip install -r requirements-dev.txt
+
+# Install git hooks (runs Ruff + checks on every commit)
+pre-commit install
 ```
 
 ### 4. Set Up Credentials
@@ -95,9 +98,8 @@ KRDL_PASSWORD=your_test_password
 # Run tests
 pytest
 
-# Check code style
-black --check .
-flake8 .
+# Run the same lint/format checks as CI
+pre-commit run --all-files
 ```
 
 ## Making Changes
@@ -136,21 +138,19 @@ pytest
 # Run specific test file
 pytest tests/test_core.py
 
-# Run with coverage
-pytest --cov=. --cov-report=html
+# Run with coverage (pytest-cov is in requirements-dev.txt)
+pytest --cov=krdl_selenium --cov=csvdl_core --cov-report=term-missing
 ```
 
-### 4. Format Your Code
+### 4. Format and Lint Your Code
 
 ```bash
-# Auto-format with black
-black .
+# Fix issues and format (Ruff; same tooling as pre-commit)
+ruff check . --fix
+ruff format .
 
-# Check linting
-flake8 .
-
-# Type checking
-mypy krdl_selenium.py csvdl_core.py
+# Or run the full hook set on all files
+pre-commit run --all-files
 ```
 
 ## Testing
@@ -162,7 +162,7 @@ mypy krdl_selenium.py csvdl_core.py
 pytest
 
 # Specific test
-pytest tests/test_core.py::test_login_success
+pytest tests/test_krdl_selenium.py::TestSavedFilePath::test_exact_match
 
 # With verbose output
 pytest -v
@@ -244,9 +244,9 @@ Once approved:
 
 ### Python Style Guide
 
-We follow [PEP 8](https://pep8.org/) with some modifications:
+We follow [PEP 8](https://pep8.org/) with some modifications. **Ruff** (via `pre-commit`) enforces lint rules and formatting; configuration lives in `pyproject.toml`.
 
-**Line Length:** 100 characters (not 79)
+**Line Length:** 100 characters (not 79), with long strings allowed where needed (`E501` ignored for pragmatism)
 
 **Imports:**
 ```python
@@ -274,48 +274,30 @@ def download_file(url: str, target: Path) -> Optional[Job]:
 def login_to_krdl(username: str, password: str) -> Optional[str]:
     """
     Login to krdl.moe and return session cookies.
-    
+
     Args:
         username: User's email address
         password: User's password
-        
+
     Returns:
         Cookie string if successful, None if failed
-        
+
     Raises:
         RequestException: If network error occurs
     """
     pass
 ```
 
-### Code Formatting
+### Linting and formatting
 
-**Use black:**
+**Ruff** (configured under `[tool.ruff]` in `pyproject.toml`):
+
 ```bash
-black .
+ruff check .
+ruff format .
 ```
 
-**Configuration:** `pyproject.toml`
-```toml
-[tool.black]
-line-length = 100
-target-version = ['py38']
-```
-
-### Linting
-
-**Use flake8:**
-```bash
-flake8 .
-```
-
-**Configuration:** `.flake8`
-```ini
-[flake8]
-max-line-length = 100
-exclude = .venv,__pycache__,.git
-ignore = E203,W503
-```
+On commit, **pre-commit** runs Ruff with autofix plus file hygiene hooks (trailing whitespace, YAML/TOML validation, etc.).
 
 ## Commit Messages
 

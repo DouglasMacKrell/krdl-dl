@@ -225,7 +225,7 @@ async def test_async_download():
 def test_download_with_mock(mocker):
     mock_driver = mocker.patch('selenium.webdriver.Chrome')
     mock_driver.return_value.current_url = "https://krdl.moe/"
-    
+
     result = download_file(url)
     assert mock_driver.called
 ```

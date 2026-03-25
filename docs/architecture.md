@@ -147,7 +147,7 @@ def download_queue(jobs, max_concurrent=2):
         while len(running) >= max_concurrent:
             check_for_finished_downloads()
             time.sleep(5)
-        
+
         # Start new download
         running.append(start_download(job))
 ```

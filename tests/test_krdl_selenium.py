@@ -67,9 +67,7 @@ class TestIsDownloadFinished:
         info = self._info(fn)
         assert dl._is_download_finished(info) is False
 
-    def test_complete_after_partial_removed(
-        self, dl: KrdlSeleniumDownloader, tmp_path: Path
-    ):
+    def test_complete_after_partial_removed(self, dl: KrdlSeleniumDownloader, tmp_path: Path):
         """Second folder check: file appears when no named .crdownload."""
         fn = "late.mkv"
         info = self._info(fn)

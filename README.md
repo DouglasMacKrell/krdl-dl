@@ -2,9 +2,10 @@
 
 A Selenium-based automated downloader for krdl.moe (tokusatsu media archive). Download complete series with proper authentication, rate limiting, and queue management.
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![CI](https://github.com/DouglasMacKrell/krdl-dl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/DouglasMacKrell/krdl-dl/actions/workflows/ci.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 ## ✨ Features
 
@@ -146,7 +147,7 @@ The downloader gracefully stops to protect your account.
 
 ## 📦 Requirements
 
-- **Python 3.8+**
+- **Python 3.9+**
 - **Google Chrome** (latest version)
 - **krdl.moe account** (free or premium)
 - **~500MB disk space** for dependencies
@@ -155,15 +156,19 @@ The downloader gracefully stops to protect your account.
 ## 🧪 Testing
 
 ```bash
+pip install -r requirements-dev.txt
+
 # Run all tests
 pytest
 
-# Run with coverage
-pytest --cov=. --cov-report=html
+# Run specific file
+pytest tests/test_krdl_selenium.py
 
-# Run specific test
-pytest tests/test_core.py::test_login_success
+# Lint & format (same as CI pre-commit)
+pre-commit run --all-files
 ```
+
+Pull requests run **[GitHub Actions](https://github.com/DouglasMacKrell/krdl-dl/actions)** (`pre-commit` + `pytest` on Python 3.9, 3.11, and 3.12).
 
 ## 🏗️ Project Structure
 
@@ -171,7 +176,11 @@ pytest tests/test_core.py::test_login_success
 krdl-dl/
 ├── krdl_selenium.py      # Main Selenium downloader
 ├── csvdl_core.py         # Shared utilities (Job, login, etc.)
-├── requirements.txt      # Python dependencies
+├── pyproject.toml        # pytest + Ruff configuration
+├── requirements.txt      # Runtime dependencies
+├── requirements-dev.txt  # Dev tools (pre-commit, pytest, Ruff)
+├── .pre-commit-config.yaml
+├── .github/workflows/    # CI
 ├── .env                  # Credentials (gitignored)
 ├── docs/                 # Documentation
 │   ├── quickstart.md
@@ -179,6 +188,7 @@ krdl-dl/
 │   └── tech-stack.md
 ├── tests/                # Test suite
 │   ├── test_core.py
+│   ├── test_krdl_selenium.py
 │   ├── test_integration.py
 │   └── test_edge_cases.py
 ├── CONTRIBUTING.md       # Contribution guidelines
@@ -194,6 +204,8 @@ krdl-dl/
 - **[requests](https://requests.readthedocs.io/)** - HTTP client
 - **[python-dotenv](https://github.com/theskumar/python-dotenv)** - Environment variables
 - **[pytest](https://pytest.org/)** - Testing framework
+- **[Ruff](https://github.com/astral-sh/ruff)** - Lint & format
+- **[pre-commit](https://pre-commit.com/)** - Git hooks for consistent quality
 
 See [Tech Stack Documentation](docs/tech-stack.md) for details.
 
@@ -207,13 +219,11 @@ See [Tech Stack Documentation](docs/tech-stack.md) for details.
 - ✅ Queue management
 - ✅ Rate limit handling
 - ✅ Comprehensive documentation
+- ✅ Pre-commit (Ruff + hygiene hooks) and GitHub Actions CI
 
 ### Planned (v1.1)
 
 - 🔲 Modern TUI with real-time progress
-- 🔲 Pre-commit hooks
-- 🔲 CI/CD pipeline (GitHub Actions)
-- 🔲 Comprehensive test suite
 - 🔲 Multi-OS testing (Linux, macOS, Windows)
 
 ### Future (v2.0)
@@ -233,7 +243,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
 3. Make your changes
-4. Run tests (`pytest`)
+4. Run `pre-commit run --all-files` and `pytest`
 5. Commit your changes (`git commit -m 'feat: add amazing feature'`)
 6. Push to the branch (`git push origin feature/amazing-feature`)
 7. Open a Pull Request
