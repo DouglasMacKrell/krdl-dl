@@ -7,6 +7,7 @@ Uses browser automation to handle JavaScript and complex authentication
 import argparse
 import os
 import time
+import unicodedata
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,6 +23,19 @@ from csvdl_core import Job, expand
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def _normalize_download_basename(name: str) -> str:
+    """
+    Match scraped / expected filenames to on-disk names. Table text can use NBSP or NFC/NFD
+    mismatches vs what Chrome writes; without this we never see the finished .mkv and loop forever.
+    """
+    if not name:
+        return ""
+    t = unicodedata.normalize("NFC", name.strip())
+    for ch in ("\u00a0", "\u2007", "\u202f", "\ufeff"):
+        t = t.replace(ch, " ")
+    return t
 
 
 class KrdlSeleniumDownloader:
@@ -433,14 +447,22 @@ class KrdlSeleniumDownloader:
         except Exception as e:
             print(f"⚠️  Save dialog handling failed: {e}")
 
-    def download_queue(self, jobs: list, max_concurrent: int = 2) -> list:
+    def download_queue(
+        self, jobs: list, max_concurrent: int = 2, stagger_seconds: float = 15.0
+    ) -> list:
         """Download files with PROPER QUEUE MANAGEMENT - only start new downloads when others finish"""
         print(f"🚀 Starting download queue with max {max_concurrent} concurrent downloads...")
         print("⚠️  Note: Downloads can take 5+ minutes each. Be patient!")
         print(f"⚠️  CRITICAL: Only {max_concurrent} downloads will run at once!")
+        if stagger_seconds > 0:
+            print(
+                f"⏸️  Between-slot stagger: {stagger_seconds:g}s pause before each new download "
+                "after the first batch (helps avoid krdl session / rate kicks)."
+            )
 
         completed_jobs = []
         running_downloads = []  # Track active downloads
+        slot_wait_loops = 0
 
         for i, job in enumerate(jobs):
             if job.status == "SKIP":
@@ -449,23 +471,49 @@ class KrdlSeleniumDownloader:
 
             print(f"📥 Queueing download {i + 1}/{len(jobs)}: {job.name}")
 
+            waited_for_slot = False
             # WAIT until we have space for a new download
             while len(running_downloads) >= max_concurrent:
+                waited_for_slot = True
                 print(
                     f"⏳ {len(running_downloads)} downloads running, waiting for one to finish..."
                 )
                 time.sleep(5)  # Check every 5 seconds
 
-                # Check if any downloads have finished
+                # Check if any downloads have finished (or stalled with no real progress)
                 finished_downloads = []
+                abandoned = []
                 for download in running_downloads:
-                    if self._is_download_finished(download):
+                    if self._should_abandon_stalled_download(download):
+                        abandoned.append(download)
+                    elif self._is_download_finished(download):
                         finished_downloads.append(download)
+
+                for download in abandoned:
+                    running_downloads.remove(download)
+                    completed_jobs.append(download["job"])
+                    print(f"❌ Dropped stalled job (slot freed): {download['filename']!r}")
 
                 # Remove finished downloads
                 for download in finished_downloads:
                     running_downloads.remove(download)
                     print(f"✅ Download finished: {download['filename']}")
+
+                if not finished_downloads and not abandoned:
+                    slot_wait_loops += 1
+                    if slot_wait_loops % 24 == 0:
+                        self._log_stuck_poll(running_downloads, slot_wait_loops)
+                else:
+                    slot_wait_loops = 0
+
+            slot_wait_loops = 0
+
+            if waited_for_slot and stagger_seconds > 0:
+                print(
+                    f"⏸️  Pausing {stagger_seconds:g}s before starting next download "
+                    "(server cooldown)..."
+                )
+                time.sleep(stagger_seconds)
 
             # Start new download
             print(f"🚀 Starting download: {job.name}")
@@ -476,8 +524,9 @@ class KrdlSeleniumDownloader:
 
             # Navigate to download URL to start download
             print("🔍 Navigating to download URL...")
+            cr_before = frozenset(self._crdownload_basenames())
             self.driver.get(job.url)
-            time.sleep(2)  # Wait for redirect
+            time.sleep(3)  # Let redirect / download handoff settle (was 2s; krdl is sensitive)
 
             # Log current state after navigation
             current_url = self.driver.current_url
@@ -511,6 +560,16 @@ class KrdlSeleniumDownloader:
             else:
                 print(f"🔍 Current URL: {current_url}")
 
+            if not self._wait_for_download_begin_signal(job.name, cr_before, timeout_sec=90):
+                print(
+                    f"❌ No download began for {job.name!r} within 90s "
+                    "(no gen.krdl redirect, no new .crdownload, no file). "
+                    "Not reserving a slot — fix rate limits / network and re-run."
+                )
+                job.status = "FAIL"
+                completed_jobs.append(job)
+                continue
+
             download_info = {
                 "job": job,
                 "filename": job.name,
@@ -523,54 +582,183 @@ class KrdlSeleniumDownloader:
 
         # Wait for remaining downloads to finish
         print(f"⏳ Waiting for {len(running_downloads)} remaining downloads to finish...")
+        drain_loops = 0
         while running_downloads:
             time.sleep(5)
             finished_downloads = []
+            abandoned = []
             for download in running_downloads:
-                if self._is_download_finished(download):
+                if self._should_abandon_stalled_download(download):
+                    abandoned.append(download)
+                elif self._is_download_finished(download):
                     finished_downloads.append(download)
                     print(f"✅ Download completed: {download['filename']}")
+
+            for download in abandoned:
+                running_downloads.remove(download)
+                completed_jobs.append(download["job"])
+                print(f"❌ Dropped stalled job: {download['filename']!r}")
 
             # Remove finished downloads
             for download in finished_downloads:
                 running_downloads.remove(download)
 
+            if not finished_downloads and not abandoned:
+                drain_loops += 1
+                if drain_loops % 24 == 0:
+                    self._log_stuck_poll(running_downloads, drain_loops)
+            else:
+                drain_loops = 0
+
         print("🎉 All downloads completed!")
         return completed_jobs
 
     def _saved_file_path(self, filename: str):
-        """Path to the finished video if it exists (exact path or same basename, case-insensitive)."""
+        """Path to the finished video if it exists (exact path or normalized basename match)."""
+        if not filename:
+            return None
+        want = _normalize_download_basename(filename).lower()
         p = self.target_dir / filename
         try:
             if p.is_file():
                 return p
         except OSError:
             pass
-        want = filename.lower()
         try:
             for f in self.target_dir.iterdir():
-                if f.is_file() and f.name.lower() == want:
+                if not f.is_file():
+                    continue
+                if _normalize_download_basename(f.name).lower() == want:
                     return f
         except OSError:
             pass
         return None
 
     def _named_partial_path(self, filename: str):
-        """Chrome partial `filename.crdownload` if present (case-insensitive basename)."""
+        """Chrome partial ``<name>.crdownload`` if present (normalized basename match)."""
+        if not filename:
+            return None
+        want = _normalize_download_basename(filename).lower()
         t = self.target_dir / f"{filename}.crdownload"
         try:
             if t.is_file():
                 return t
         except OSError:
             pass
-        want = f"{filename}.crdownload".lower()
         try:
             for f in self.target_dir.iterdir():
-                if f.is_file() and f.name.lower() == want:
+                if not f.is_file():
+                    continue
+                n = f.name
+                low = n.lower()
+                if not low.endswith(".crdownload"):
+                    continue
+                stem = n[: -len(".crdownload")]
+                if _normalize_download_basename(stem).lower() == want:
                     return f
         except OSError:
             pass
         return None
+
+    def _log_stuck_poll(self, running_downloads: list, polls: int) -> None:
+        """Explain why we are not seeing completion (helps debug false-negative stalls)."""
+        elapsed_s = polls * 5
+        print(
+            f"⚠️  Still waiting (~{elapsed_s // 60}m {elapsed_s % 60}s, {polls} polls @ 5s) — "
+            "filesystem check:"
+        )
+        for d in running_downloads:
+            fn = d.get("filename")
+            if not fn:
+                print("   • (job has no filename)")
+                continue
+            saved = self._saved_file_path(fn)
+            partial = self._named_partial_path(fn)
+            print(
+                f"   • {fn!r} → "
+                f"final={'OK ' + saved.name if saved else 'missing'}, "
+                f"partial={partial.name if partial else 'none'}"
+            )
+
+    def _crdownload_basenames(self) -> set[str]:
+        try:
+            return {p.name for p in self.target_dir.glob("*.crdownload")}
+        except OSError:
+            return set()
+
+    def _wait_for_download_begin_signal(
+        self, filename: str | None, cr_before: frozenset[str], *, timeout_sec: int = 90
+    ) -> bool:
+        """
+        Do not treat a navigation as a live download until the browser or filesystem shows
+        something real (gen.krdl redirect, expected/named files, or any new .crdownload row).
+        Otherwise we reserve both slots forever while Chrome shows nothing.
+        """
+        deadline = time.time() + timeout_sec
+        fn = str(filename or "")
+        while time.time() < deadline:
+            try:
+                cur = self.driver.current_url or ""
+            except Exception:
+                cur = ""
+            if "gen.krdl.moe" in cur:
+                return True
+            if fn and (self._saved_file_path(fn) or self._named_partial_path(fn)):
+                return True
+            after = frozenset(self._crdownload_basenames())
+            if after > cr_before:
+                return True
+            time.sleep(2)
+        return False
+
+    def _should_abandon_stalled_download(self, download_info: dict) -> bool:
+        """
+        Drop jobs that will never satisfy _is_download_finished: frozen named partial,
+        or no file / no named partial for so long that Chrome almost certainly never attached.
+        """
+        job = download_info.get("job")
+        fn = str(download_info.get("filename") or "")
+        if not fn:
+            if job is not None:
+                job.status = "FAIL"
+            return True
+        if self._saved_file_path(fn):
+            return False
+
+        now = time.time()
+        start = float(download_info.get("start_time", now))
+        elapsed = now - start
+        partial = self._named_partial_path(fn)
+
+        if partial is not None:
+            sz = partial.stat().st_size
+            if "stall_size" not in download_info:
+                download_info["stall_size"] = sz
+                download_info["stall_since"] = now
+                return False
+            if sz != download_info["stall_size"]:
+                download_info["stall_size"] = sz
+                download_info["stall_since"] = now
+                return False
+            stall = now - float(download_info.get("stall_since", start))
+            if stall >= 480:
+                print(
+                    f"❌ Giving up on {fn!r}: named .crdownload stuck at {sz:,} B for {stall:.0f}s"
+                )
+                if job is not None:
+                    job.status = "FAIL"
+                return True
+            return False
+
+        if elapsed >= 900:
+            print(
+                f"❌ Giving up on {fn!r}: no .mkv and no named .crdownload after {elapsed:.0f}s "
+                f"(Chrome likely never started this file)"
+            )
+            if job is not None:
+                job.status = "FAIL"
+            return True
+        return False
 
     def _notify_saved_complete(self, download_info: dict, saved: Path, fn: str) -> bool:
         file_size = saved.stat().st_size
@@ -589,7 +777,10 @@ class KrdlSeleniumDownloader:
         If there is no such partial, look at the folder again — we do not wait on Chrome alone.
         """
         try:
-            fn = download_info["filename"]
+            fn = download_info.get("filename")
+            if not fn:
+                return False
+            fn = str(fn)
             saved = self._saved_file_path(fn)
             if saved is not None:
                 return self._notify_saved_complete(download_info, saved, fn)
@@ -639,6 +830,17 @@ def main():
     ap.add_argument("--username", help="krdl.moe username for authentication")
     ap.add_argument("--password", help="krdl.moe password for authentication")
     ap.add_argument("--limit", type=int, help="Limit the number of files to download (for testing)")
+    ap.add_argument(
+        "--stagger-seconds",
+        type=float,
+        default=15.0,
+        metavar="SEC",
+        help=(
+            "Seconds to pause before starting each new download after waiting for a slot to free "
+            "(default: 15). Use 0 to disable. Helps avoid krdl premium/rate redirects when chaining "
+            "many files."
+        ),
+    )
     args = ap.parse_args()
 
     # Validate target directory
@@ -748,7 +950,11 @@ def main():
             return
 
         # Download files with PROPER QUEUE - max 2 concurrent
-        completed_jobs = downloader.download_queue(queued_jobs, max_concurrent=2)
+        completed_jobs = downloader.download_queue(
+            queued_jobs,
+            max_concurrent=2,
+            stagger_seconds=args.stagger_seconds,
+        )
 
         # Summary
         successful = [j for j in completed_jobs if j.status == "DONE"]

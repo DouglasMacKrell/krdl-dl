@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for krdl_selenium download completion logic (no browser)."""
 
+import time
 from pathlib import Path
 
 import pytest
@@ -84,3 +85,52 @@ class TestIsDownloadFinished:
         (tmp_path / f"{fn}.crdownload").write_bytes(b"stale")
         info = self._info(fn)
         assert dl._is_download_finished(info) is True
+
+    def test_completed_file_found_when_table_name_has_nbsp(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        """Scraped table text may use NBSP where Chrome uses a normal space — still detect done."""
+        on_disk = "[FJ-Earthly] Rumble_01_[ABC12345].mkv"
+        (tmp_path / on_disk).write_bytes(b"ok")
+        info = self._info("[FJ-Earthly]\u00a0Rumble_01_[ABC12345].mkv")
+        assert dl._is_download_finished(info) is True
+
+    def test_named_partial_matches_with_nbsp_expected(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        """Named .crdownload is found when the expected basename differs only by NBSP vs space."""
+        partial_path = tmp_path / "[x] y.mkv.crdownload"
+        partial_path.write_bytes(b"growing")
+        info = self._info("[x]\u00a0y.mkv")
+        assert dl._is_download_finished(info) is False
+        assert dl._named_partial_path(info["filename"]) == partial_path
+
+
+class TestAbandonStalled:
+    def test_abandon_after_long_time_no_file_no_named_partial(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        job = Job(url="u", name="ghost.mkv", status="QUEUED")
+        info = {
+            "job": job,
+            "filename": "ghost.mkv",
+            "start_time": time.time() - 950,
+            "url": "u",
+        }
+        assert dl._should_abandon_stalled_download(info) is True
+        assert job.status == "FAIL"
+
+    def test_abandon_frozen_named_partial(self, dl: KrdlSeleniumDownloader, tmp_path: Path):
+        job = Job(url="u", name="stuck.mkv", status="QUEUED")
+        p = tmp_path / "stuck.mkv.crdownload"
+        p.write_bytes(b"x")
+        info = {
+            "job": job,
+            "filename": "stuck.mkv",
+            "start_time": time.time() - 10000,
+            "url": "u",
+            "stall_size": 1,
+            "stall_since": time.time() - 500,
+        }
+        assert dl._should_abandon_stalled_download(info) is True
+        assert job.status == "FAIL"
