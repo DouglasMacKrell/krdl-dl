@@ -105,6 +105,25 @@ class TestIsDownloadFinished:
         assert dl._is_download_finished(info) is False
         assert dl._named_partial_path(info["filename"]) == partial_path
 
+    def test_not_complete_while_claimed_chrome_partial(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        fn = "episode.mkv"
+        (tmp_path / "Unconfirmed 999.crdownload").write_bytes(b"growing")
+        info = self._info(fn)
+        info["claimed_crdownloads"] = {"Unconfirmed 999.crdownload"}
+        assert dl._is_download_finished(info) is False
+
+    def test_complete_when_mkv_appears_after_claimed_partial(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        fn = "episode.mkv"
+        info = self._info(fn)
+        info["claimed_crdownloads"] = {"Unconfirmed 999.crdownload"}
+        assert dl._is_download_finished(info) is False
+        (tmp_path / fn).write_bytes(b"done")
+        assert dl._is_download_finished(info) is True
+
 
 class TestAbandonStalled:
     def test_abandon_after_long_time_no_file_no_named_partial(
@@ -116,6 +135,21 @@ class TestAbandonStalled:
             "filename": "ghost.mkv",
             "start_time": time.time() - 950,
             "url": "u",
+        }
+        assert dl._should_abandon_stalled_download(info) is True
+        assert job.status == "FAIL"
+
+    def test_abandon_when_claimed_crdownload_vanished(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        job = Job(url="u", name="gone.mkv", status="QUEUED")
+        info = {
+            "job": job,
+            "filename": "gone.mkv",
+            "start_time": time.time() - 30,
+            "url": "u",
+            "claimed_crdownloads": {"Unconfirmed 12345.crdownload"},
+            "claim_vanished_since": time.time() - 95,
         }
         assert dl._should_abandon_stalled_download(info) is True
         assert job.status == "FAIL"

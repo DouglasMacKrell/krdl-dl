@@ -560,7 +560,10 @@ class KrdlSeleniumDownloader:
             else:
                 print(f"🔍 Current URL: {current_url}")
 
-            if not self._wait_for_download_begin_signal(job.name, cr_before, timeout_sec=90):
+            began, claimed_new = self._wait_for_download_begin_signal(
+                job.name, cr_before, timeout_sec=90
+            )
+            if not began:
                 print(
                     f"❌ No download began for {job.name!r} within 90s "
                     "(no gen.krdl redirect, no new .crdownload, no file). "
@@ -575,7 +578,10 @@ class KrdlSeleniumDownloader:
                 "filename": job.name,
                 "start_time": time.time(),
                 "url": job.url,
+                "claimed_crdownloads": set(claimed_new),
             }
+            if claimed_new:
+                print(f"🔖 Tracking Chrome partial(s) for this job: {', '.join(sorted(claimed_new))}")
 
             running_downloads.append(download_info)
             print(f"📊 Active downloads: {len(running_downloads)}/{max_concurrent}")
@@ -674,10 +680,13 @@ class KrdlSeleniumDownloader:
                 continue
             saved = self._saved_file_path(fn)
             partial = self._named_partial_path(fn)
+            claimed = d.get("claimed_crdownloads") or set()
+            claim_status = ", ".join(c for c in sorted(claimed) if c) or "none"
             print(
                 f"   • {fn!r} → "
                 f"final={'OK ' + saved.name if saved else 'missing'}, "
-                f"partial={partial.name if partial else 'none'}"
+                f"partial={partial.name if partial else 'none'}, "
+                f"claimed={claim_status}"
             )
 
     def _crdownload_basenames(self) -> set[str]:
@@ -688,11 +697,11 @@ class KrdlSeleniumDownloader:
 
     def _wait_for_download_begin_signal(
         self, filename: str | None, cr_before: frozenset[str], *, timeout_sec: int = 90
-    ) -> bool:
+    ) -> tuple[bool, frozenset[str]]:
         """
         Do not treat a navigation as a live download until the browser or filesystem shows
-        something real (gen.krdl redirect, expected/named files, or any new .crdownload row).
-        Otherwise we reserve both slots forever while Chrome shows nothing.
+        something real. Returns which *new* .crdownload names appeared when we succeed so each
+        job tracks *its* Chrome partial (avoids phantom slots when a partial vanishes).
         """
         deadline = time.time() + timeout_sec
         fn = str(filename or "")
@@ -701,15 +710,17 @@ class KrdlSeleniumDownloader:
                 cur = self.driver.current_url or ""
             except Exception:
                 cur = ""
-            if "gen.krdl.moe" in cur:
-                return True
-            if fn and (self._saved_file_path(fn) or self._named_partial_path(fn)):
-                return True
             after = frozenset(self._crdownload_basenames())
-            if after > cr_before:
-                return True
+            new_crs = frozenset(after - cr_before)
+
+            if "gen.krdl.moe" in cur:
+                return True, new_crs
+            if fn and (self._saved_file_path(fn) or self._named_partial_path(fn)):
+                return True, new_crs
+            if new_crs:
+                return True, new_crs
             time.sleep(2)
-        return False
+        return False, frozenset()
 
     def _should_abandon_stalled_download(self, download_info: dict) -> bool:
         """
@@ -750,10 +761,53 @@ class KrdlSeleniumDownloader:
                 return True
             return False
 
-        if elapsed >= 900:
+        claimed = download_info.get("claimed_crdownloads") or set()
+        any_claim_file = False
+        for cname in claimed:
+            cp = self.target_dir / cname
+            try:
+                if cp.is_file() and cname.lower().endswith(".crdownload"):
+                    any_claim_file = True
+                    sz = cp.stat().st_size
+                    key = f"claim:{cname}"
+                    if f"{key}_since" not in download_info:
+                        download_info[key] = sz
+                        download_info[f"{key}_since"] = now
+                    elif sz != download_info[key]:
+                        download_info[key] = sz
+                        download_info[f"{key}_since"] = now
+                    else:
+                        cstall = now - float(download_info.get(f"{key}_since", start))
+                        if cstall >= 480:
+                            print(
+                                f"❌ Giving up on {fn!r}: claimed partial {cname!r} "
+                                f"stuck at {sz:,} B for {cstall:.0f}s"
+                            )
+                            if job is not None:
+                                job.status = "FAIL"
+                            return True
+            except OSError:
+                pass
+
+        if claimed and not any_claim_file:
+            van = download_info.get("claim_vanished_since")
+            if van is None:
+                download_info["claim_vanished_since"] = now
+            elif now - van >= 90:
+                print(
+                    f"❌ Giving up on {fn!r}: claimed .crdownload(s) vanished with no "
+                    f".mkv ({list(claimed)!r}) — Chrome may have cancelled the transfer"
+                )
+                if job is not None:
+                    job.status = "FAIL"
+                return True
+        else:
+            download_info.pop("claim_vanished_since", None)
+
+        if not claimed and elapsed >= 180:
             print(
-                f"❌ Giving up on {fn!r}: no .mkv and no named .crdownload after {elapsed:.0f}s "
-                f"(Chrome likely never started this file)"
+                f"❌ Giving up on {fn!r}: no .mkv, no named partial, no claimed .crdownload "
+                f"after {elapsed:.0f}s (nothing to track — likely never really started)"
             )
             if job is not None:
                 job.status = "FAIL"
@@ -795,6 +849,22 @@ class KrdlSeleniumDownloader:
                     download_info["last_size"] = current_size
                     print(f"🔍 Downloading: {fn} ({current_size:,} bytes)")
                 return False
+
+            for cname in sorted(download_info.get("claimed_crdownloads") or ()):
+                cp = self.target_dir / cname
+                try:
+                    if cp.is_file() and cname.lower().endswith(".crdownload"):
+                        current_size = cp.stat().st_size
+                        key = f"claim_last:{cname}"
+                        if key not in download_info:
+                            download_info[key] = current_size
+                            print(f"🔍 Download started: {fn} (partial: {cname})")
+                        elif current_size != download_info[key]:
+                            download_info[key] = current_size
+                            print(f"🔍 Downloading: {fn} ({cname}, {current_size:,} bytes)")
+                        return False
+                except OSError:
+                    pass
 
             saved = self._saved_file_path(fn)
             if saved is not None:
