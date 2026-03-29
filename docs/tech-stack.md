@@ -41,15 +41,15 @@ pre-commit install
 
 Workflow: `.github/workflows/ci.yml`
 
-1. **pre-commit** job — runs `pre-commit run --all-files` on Python 3.12.  
+1. **pre-commit** job — runs `pre-commit run --all-files` on Python 3.12.
 2. **test** job — matrix **Python 3.9, 3.11, 3.12** on Ubuntu: `pip install -r requirements-dev.txt` then `python -m pytest tests/`.
 
 Triggers: push and pull request to **`main`** and **`develop`**.
 
 ## Code quality
 
-- **Ruff** replaces separate black/flake8/isort for this repo.  
-- Rules under `[tool.ruff.lint]` in `pyproject.toml`; line length 100 with pragmatic `E501` ignore.  
+- **Ruff** replaces separate black/flake8/isort for this repo.
+- Rules under `[tool.ruff.lint]` in `pyproject.toml`; line length 100 with pragmatic `E501` ignore.
 
 Run manually:
 
@@ -68,12 +68,12 @@ Developed and tested primarily on **macOS** and **Linux** CI. **Windows** should
 
 ## Resource expectations
 
-- **Chrome**: on the order of hundreds of MB RAM.  
-- **Disk**: episodes often hundreds of MiB to GiB each; target volume needs free space plus headroom for concurrent `.crdownload` files.  
+- **Chrome**: on the order of hundreds of MB RAM.
+- **Disk**: episodes often hundreds of MiB to GiB each; target volume needs free space plus headroom for concurrent `.crdownload` files.
 - **Network**: bounded by krdl free-tier throughput when downloading.
 
 ## Useful links
 
-- [Selenium documentation](https://www.selenium.dev/documentation/)  
-- [Ruff](https://docs.astral.sh/ruff/)  
-- [pytest](https://docs.pytest.org/)  
+- [Selenium documentation](https://www.selenium.dev/documentation/)
+- [Ruff](https://docs.astral.sh/ruff/)
+- [pytest](https://docs.pytest.org/)

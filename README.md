@@ -15,17 +15,17 @@ A Selenium-based automated downloader for [krdl.moe](https://krdl.moe) (tokusats
 
 ## Features
 
-- **Authenticated downloads** via Selenium (Chrome) and your krdl credentials  
-- **Show-page scraping** with pagination set to **All** so long series are fully listed  
-- **Extension filter**: `--ext mkv` or `--ext mp4` (only links matching that type are queued)  
-- **Per-episode quality selection** (`--quality hd` default): uses **KRDL table file sizes** (MiB/GiB) as the main signal; `hd` prefers the **larger** file per episode, `sd` the **smaller**; filenames containing `_HD_` break ties  
-- **Canonical episode keys** so multiple releases (e.g. SD + HD, different groups) collapse to **one** download per episode when both map to the same number; specials/movies use dedicated keys (including `_The_Movie_` style names)  
-- **Two concurrent downloads** (`max_concurrent=2`), aligned with krdl free-tier messaging  
-- **Configurable stagger** (`--stagger-seconds`) before starting the next job after a slot frees—helps avoid aggressive back-to-back hits when chaining many files  
-- **Duplicate skip** using **finished** `*.{ext}` files only (stale `.crdownload` partials are **not** treated as “already downloaded”); optional removal of a matching stale partial before retry  
-- **Download tracking** via final filenames plus `*.crdownload` (including per-job **claimed** partials from Chrome)  
-- **Rate-limit / premium redirect** detection: stops the queue instead of hammering the site  
-- **`--limit`** for dry runs or sampling  
+- **Authenticated downloads** via Selenium (Chrome) and your krdl credentials
+- **Show-page scraping** with pagination set to **All** so long series are fully listed
+- **Extension filter**: `--ext mkv` or `--ext mp4` (only links matching that type are queued)
+- **Per-episode quality selection** (`--quality hd` default): uses **KRDL table file sizes** (MiB/GiB) as the main signal; `hd` prefers the **larger** file per episode, `sd` the **smaller**; filenames containing `_HD_` break ties
+- **Canonical episode keys** so multiple releases (e.g. SD + HD, different groups) collapse to **one** download per episode when both map to the same number; specials/movies use dedicated keys (including `_The_Movie_` style names)
+- **Two concurrent downloads** (`max_concurrent=2`), aligned with krdl free-tier messaging
+- **Configurable stagger** (`--stagger-seconds`) before starting the next job after a slot frees—helps avoid aggressive back-to-back hits when chaining many files
+- **Duplicate skip** using **finished** `*.{ext}` files only (stale `.crdownload` partials are **not** treated as “already downloaded”); optional removal of a matching stale partial before retry
+- **Download tracking** via final filenames plus `*.crdownload` (including per-job **claimed** partials from Chrome)
+- **Rate-limit / premium redirect** detection: stops the queue instead of hammering the site
+- **`--limit`** for dry runs or sampling
 
 ## Documentation
 
@@ -109,12 +109,12 @@ python3 krdl_selenium.py --url "…" --target "…" --username "…" --password 
 
 ## How it works (short)
 
-1. Load `.env`, start Chrome with download directory set to `--target`.  
-2. Log in to krdl; navigate to `--url`.  
-3. Set the DataTables-style length menu to **All**; read each row’s **filename**, **size**, and **download** link for the requested extension.  
-4. **Quality pass**: group rows by a parsed **canonical episode/movie key**; keep one row per key per `--quality` rules.  
-5. **Disk dedupe**: skip any file whose final `*.{ext}` already exists (prefix rules avoid obvious collisions).  
-6. **Queue**: at most two active downloads; each job hits its download URL in the same tab; wait for gen.krdl / partial / file signals before counting a slot full.  
+1. Load `.env`, start Chrome with download directory set to `--target`.
+2. Log in to krdl; navigate to `--url`.
+3. Set the DataTables-style length menu to **All**; read each row’s **filename**, **size**, and **download** link for the requested extension.
+4. **Quality pass**: group rows by a parsed **canonical episode/movie key**; keep one row per key per `--quality` rules.
+5. **Disk dedupe**: skip any file whose final `*.{ext}` already exists (prefix rules avoid obvious collisions).
+6. **Queue**: at most two active downloads; each job hits its download URL in the same tab; wait for gen.krdl / partial / file signals before counting a slot full.
 7. On premium/register-style URL, **stop** the run.
 
 See [docs/architecture.md](docs/architecture.md) for detail and limitations.
@@ -125,10 +125,10 @@ Typical messages on the site include **~400 kbps per file** and **at most two si
 
 ## Requirements
 
-- **Python 3.9+**  
-- **Google Chrome** (current stable; ChromeDriver via webdriver-manager)  
-- **krdl.moe account**  
-- Network and disk suitable for multi‑GB series  
+- **Python 3.9+**
+- **Google Chrome** (current stable; ChromeDriver via webdriver-manager)
+- **krdl.moe account**
+- Network and disk suitable for multi‑GB series
 
 ## Testing & CI
 

@@ -41,8 +41,8 @@ python3 krdl_selenium.py \
   --quality hd
 ```
 
-- **`--ext`**: only `mkv` or `mp4` links from the table are collected.  
-- **`--quality hd`** (default): for each **episode number** (or movie key) found in filenames, the script keeps the row with the **largest** size reported in the table; if sizes tie, it prefers filenames containing `_HD_`. If only one rip exists for that episode, it is used.  
+- **`--ext`**: only `mkv` or `mp4` links from the table are collected.
+- **`--quality hd`** (default): for each **episode number** (or movie key) found in filenames, the script keeps the row with the **largest** size reported in the table; if sizes tie, it prefers filenames containing `_HD_`. If only one rip exists for that episode, it is used.
 - **`--quality sd`**: prefers **smaller** sizes (and ties toward names **without** `_HD_`), still falling back when only one row exists.
 
 ## MP4 only
@@ -96,9 +96,9 @@ Full list: `python3 krdl_selenium.py --help` or the root [README](../README.md).
 
 ## What to expect
 
-1. A Chrome window opens (unless `--headless`), logs in, opens the show page.  
-2. Pagination is set to **All** so every table row is visible.  
-3. The script builds a queue, skips names that already exist as finished `*.{ext}`, then downloads with **at most two** active transfers.  
+1. A Chrome window opens (unless `--headless`), logs in, opens the show page.
+2. Pagination is set to **All** so every table row is visible.
+3. The script builds a queue, skips names that already exist as finished `*.{ext}`, then downloads with **at most two** active transfers.
 4. Interrupted runs: **stale `.crdownload` files are not treated as completed episodes**—re-run to retry. A matching partial is removed when a job starts if the final file is still missing.
 
 ## Troubleshooting
@@ -112,8 +112,8 @@ Full list: `python3 krdl_selenium.py --help` or the root [README](../README.md).
 
 ## Next steps
 
-- [Architecture](architecture.md) — pipeline and design trade‑offs  
-- [Tech stack](tech-stack.md) — dependencies and CI  
-- [Contributing](../CONTRIBUTING.md) — dev setup  
+- [Architecture](architecture.md) — pipeline and design trade‑offs
+- [Tech stack](tech-stack.md) — dependencies and CI
+- [Contributing](../CONTRIBUTING.md) — dev setup
 
 Need help? Open an [issue](https://github.com/DouglasMacKrell/krdl-dl/issues) with the exact command and message you see.

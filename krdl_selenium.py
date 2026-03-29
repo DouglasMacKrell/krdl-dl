@@ -4,13 +4,15 @@ Selenium-based krdl.moe downloader
 Uses browser automation to handle JavaScript and complex authentication
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import re
 import time
 import unicodedata
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional, Tuple  # noqa: UP035
 
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -97,7 +99,8 @@ def _canonical_episode_key(filename: str) -> str:
     return f"unique:{n}"
 
 
-ScrapeRow = tuple[str, str, int | None]
+# Module-level alias: typing.Tuple required for Python 3.9 (tuple[…] and X|Y evaluated at import time).
+ScrapeRow = Tuple[str, str, Optional[int]]  # noqa: UP006
 
 
 def filter_by_quality_preference(
@@ -706,7 +709,9 @@ class KrdlSeleniumDownloader:
                 "claimed_crdownloads": set(claimed_new),
             }
             if claimed_new:
-                print(f"🔖 Tracking Chrome partial(s) for this job: {', '.join(sorted(claimed_new))}")
+                print(
+                    f"🔖 Tracking Chrome partial(s) for this job: {', '.join(sorted(claimed_new))}"
+                )
 
             running_downloads.append(download_info)
             print(f"📊 Active downloads: {len(running_downloads)}/{max_concurrent}")
