@@ -1,359 +1,118 @@
-# Architecture & Design Choices
+# Architecture & design
 
-This document explains the technical architecture of krdl-dl and the reasoning behind key design decisions.
+How krdl-dl is structured, why it uses Selenium, and how scraping, quality selection, and the download queue fit together.
 
-## Overview
-
-krdl-dl is a Selenium-based web scraper and downloader specifically designed for krdl.moe, a tokusatsu (Japanese special effects) media archive. The tool automates the process of downloading complete series while respecting the site's rate limits and authentication requirements.
-
-## Architecture Diagram
+## High-level diagram
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     krdl_selenium.py                         │
-│                   (Main Entry Point)                         │
-└───────────────────────────┬─────────────────────────────────┘
-                            │
-                ┌───────────┴───────────┐
-                │                       │
-                ▼                       ▼
-┌───────────────────────┐   ┌──────────────────────┐
-│   csvdl_core.py       │   │  Selenium WebDriver  │
-│   (Utilities)         │   │  (Browser Automation)│
-│                       │   │                      │
-│ - Job dataclass       │   │ - Chrome browser     │
-│ - login_to_krdl()     │   │ - Page navigation    │
-│ - scrape_krdl_page()  │   │ - Element finding    │
-│ - expand()            │   │ - Download handling  │
-└───────────────────────┘   └──────────────────────┘
-                │                       │
-                └───────────┬───────────┘
-                            │
-                            ▼
-                ┌───────────────────────┐
-                │    krdl.moe Website   │
-                │  (Target Site)        │
-                └───────────────────────┘
+                    krdl_selenium.py (CLI + orchestration)
+ login ─► scrape (tables, sizes) ─► quality filter ─► disk dedupe ─► download_queue
+                                              │                    │
+         csvdl_core.py (Job, expand, …) ◄──────┴────────────────────┘
+                                              │
+                                   Chrome / chromedriver ─► krdl.moe + gen.krdl
 ```
 
-## Core Components
+## Main components
 
-### 1. KrdlSeleniumDownloader Class
+### `krdl_selenium.py`
 
-**Location:** `krdl_selenium.py`
+- **`KrdlSeleniumDownloader`**: Chrome profile (download directory prefs), `setup_driver`, `clear_all_data` after launch, `login`, `scrape_download_links`, `download_queue`, completion / stall helpers.  
+- **Pure helpers** (unit-tested without a browser):  
+  - `_parse_krdl_size_bytes` — table strings like `244.85 MiB`, `1.19 GiB` → integer bytes.  
+  - `_canonical_episode_key` — maps a table filename to a stable key (`ep:001`, `movie`, or `unique:…`).  
+  - `_is_hd_filename` — `_HD_` in the normalized basename.  
+  - `filter_by_quality_preference` — one `(url, filename, size_bytes)` per key for `hd` or `sd` mode.
 
-**Responsibilities:**
-- Browser setup and configuration
-- Session management (login/logout)
-- Page scraping (link extraction)
-- Download queue management
-- Progress monitoring
+### `csvdl_core.py`
 
-**Key Methods:**
+Shared utilities: **`Job`** (`url`, `name`, `out_path`, `expected_bytes`, `status`, …), **`expand`**, requests/BeautifulSoup helpers used by tests or alternate flows—not the primary Selenium path.
 
-```python
-setup_driver()           # Initialize Chrome with custom preferences
-login(username, password) # Authenticate with krdl.moe
-scrape_download_links()  # Extract download URLs from show page
-download_queue()         # Manage concurrent downloads
-_is_download_finished()  # Monitor .crdownload files
-```
+## End-to-end pipeline
 
-### 2. Utility Functions
+1. **Driver setup**  
+   Chrome is configured with `download.default_directory` = `--target`, prompts disabled, automation flags toned down. **Incognito is intentionally not used** so download prefs apply; a **fresh session** is approximated by clearing storage/cookies in `clear_all_data()` right after startup.
 
-**Location:** `csvdl_core.py`
+2. **Login**  
+   Form fill on `/login`, then check URL/title for success.
 
-**Responsibilities:**
-- Shared utilities used across the application
-- Authentication helpers
-- Data structures (Job class)
+3. **Scrape**  
+   - Open the show `--url`.  
+   - Locate the DataTables **length** `<select>`, choose **All**, short sleep for redraw.  
+   - For each `<tr>` with ≥4 `<td>` cells: take **filename** (col 0), **size text** (col 1), **href** (last col).  
+   - Append `(url, filename, parsed_size_or_None)` when the href matches `/download/…` and the chosen `--ext`.
 
-**Key Functions:**
+4. **Quality filter**  
+   - Group rows by `_canonical_episode_key(filename)`.  
+   - **`hd`**: `max` by `(size_bytes if known else -1, 1 if _HD_ else 0)`.  
+   - **`sd`**: `min` by `(size_bytes if known else +inf, 1 if _HD_ else 0)` so non-HD names win ties toward small files.  
+   - Episodes that only exist in one quality still download (single row in group).
 
-```python
-Job                      # Dataclass for tracking downloads
-expand(path)            # Path expansion (~, env vars)
-login_to_krdl()         # Session-based login (requests)
-scrape_krdl_page()      # Fallback scraper (BeautifulSoup)
-```
+   **Key examples** (regex family, not an exhaustive grammar of every rip on krdl):
 
-## Design Decisions
+   - `_Ep12_…`, `_-_12_…` (Nemet-style), `_12_[hexhash]` before CRC bracket → same `ep:012`.  
+   - `_The_Movie_…`, `_Movie_[…]`, `(The_)?Movie…_HD_` → `movie` (covers several naming styles including `The_Movie_v2` vs `The_Movie_1080p`).
 
-### Why Selenium Instead of Requests?
+5. **Disk dedupe**  
+   - Collect lowercase basenames of existing `*.{ext}` under `--target` only.  
+   - **Do not** mark an episode “done” because a `*.crdownload` exists—that caused false skips when Chrome removed a partial or a run crashed.  
+   - Optional **prefix** skip if another file’s name shares the stem (Chrome renames).  
 
-**Initial Approach:** Used `requests` + `BeautifulSoup` + `curl` for downloads.
+6. **Jobs**  
+   `Job.expected_bytes` is filled from the table when parsing succeeded (optional future use / debugging).
 
-**Problems:**
-- ❌ Session management was fragile (cookies expired quickly)
-- ❌ CSRF token handling was unreliable
-- ❌ Difficult to debug authentication issues
-- ❌ No visibility into download progress
-- ❌ Hard to handle rate limiting gracefully
+7. **Download queue**  
+   - At most **`max_concurrent=2`** entries in `running_downloads`.  
+   - For each job: optionally **delete** `filename.crdownload` if the final `filename` is missing (retry hygiene).  
+   - Snapshot `*.crdownload` basenames **before** `driver.get(job.url)`; after navigation, `_wait_for_download_begin_signal` requires **gen.krdl** in the URL, a **named** partial, **any new** `.crdownload`, or the final file—before reserving a slot.  
+   - **Claimed partials**: new `.crdownload` names seen at begin time are stored on the job so stall logic tracks the **right** partial and does not confuse two concurrent Chrome downloads.  
+   - **`--stagger-seconds`**: sleeps after `waited_for_slot` becomes true—i.e. before kicking off the next file **after** at least one active download finished—reducing back-to-back hits on krdl.  
+   - If the current URL matches register/premium patterns, **return immediately** (partial queue state; user should cool off).
 
-**Selenium Advantages:**
-- ✅ Real browser = authentic authentication
-- ✅ Visual debugging (can see what's happening)
-- ✅ Automatic cookie management
-- ✅ Native download handling (Chrome's download manager)
-- ✅ Easy to detect redirects (premium/register pages)
-- ✅ Handles JavaScript-rendered content
+8. **Completion / abandon**  
+   Final file detected with Unicode-normalized basename match (NBSP, etc.). Stalls: frozen partial, vanished claimed partial, or “never started” windows—see `_should_abandon_stalled_download` in code.
 
-**Trade-off:** Slightly slower, requires Chrome, but much more reliable.
+## Design choices
 
-### Why Direct Download to Target Directory?
+### Why Selenium?
 
-**Alternative Considered:** Download to temp directory, then move files.
+krdl is a logged-in, JS-heavy site with cookie/session behavior; driving a real browser matches what users do manually and makes redirects observable. **`requests`-only** helpers remain in `csvdl_core` for tests or experimentation, not the main downloader path.
 
-**Chosen Approach:** Configure Chrome to download directly to target directory.
+### Why table sizes for “quality”?
 
-**Reasoning:**
-- ✅ Simpler flow (no file moving logic)
-- ✅ Fewer potential points of failure
-- ✅ No risk of incomplete moves
-- ✅ Chrome handles all file naming automatically
-- ✅ Atomic operations (file appears when complete)
+Filenames are not always honest (“HD” in the name does not guarantee the larger file). The **site-published size** is used as the primary signal; **`_HD_`** is a tiebreaker when sizes tie or are missing.
 
-### Why Monitor .crdownload Files?
+### Why one browser tab?
 
-**Challenge:** How do we know when a download is complete?
+Each `driver.get(download_url)` serializes navigation. Concurrency is **filesystem + server**: up to two transfers in flight in Chrome, not ten parallel tabs.
 
-**Solution:** Monitor Chrome's temporary `.crdownload` files.
+### Pagination “All”
 
-**Flow:**
-1. Chrome creates `Unconfirmed_[HASH].crdownload`
-2. File grows as download progresses
-3. Chrome renames to final filename when complete
-4. We detect the rename and mark download as done
+Default table length hides rows; selecting **All** prevents partial series lists.
 
-**Why This Works:**
-- ✅ Chrome's native behavior (no hacks)
-- ✅ Reliable completion detection
-- ✅ Works with any filename
-- ✅ No polling file sizes or timeouts
+## Limitations & gotchas
 
-### Why Queue Management Instead of Parallel Downloads?
+- **No cross-extension merge**: `--ext mkv` never compares MKV size to MP4 size; choosing container is explicit.  
+- **Unknown filenames** fall into `unique:…` keys—no dedupe across unrelated rows.  
+- **Very slow free tier** (e.g. ~400 kbps/file): wall time dominates; stall timeouts assume eventually consistent disk state.  
+- **Two processes** hitting the same account can exceed “2 downloads” from krdl’s perspective.  
+- **Resume** is “re-run the same command”: existing finals are skipped; there is no separate state file.
 
-**krdl.moe Limits:**
-- Maximum 2 concurrent downloads
-- Exceeding limit = temporary account restriction
-- ~5 minutes per file (400kbps speed limit)
+## Security & credentials
 
-**Our Approach:**
-```python
-def download_queue(jobs, max_concurrent=2):
-    running = []
-    for job in jobs:
-        # Wait until we have space
-        while len(running) >= max_concurrent:
-            check_for_finished_downloads()
-            time.sleep(5)
-
-        # Start new download
-        running.append(start_download(job))
-```
+- Prefer `.env` or env vars; do not commit secrets.  
+- Logs partially redact usernames in some print paths—still treat terminal output as sensitive.
 
-**Benefits:**
-- ✅ Never exceeds site limits
-- ✅ Automatic refilling as downloads complete
-- ✅ Graceful handling of failures
-- ✅ User-friendly progress messages
-
-### Why Pagination Handling?
-
-**Problem:** Show pages only display 25 entries by default.
-
-**Solution:** Click "All" in the pagination dropdown before scraping.
+## Testing
 
-**Implementation:**
-```python
-# Find pagination dropdown
-select = driver.find_element(By.CSS_SELECTOR, "select[name*='length']")
-select.click()
+Tests live under `tests/`:
 
-# Select "All" option
-all_option = select.find_element(By.XPATH, ".//option[text()='All']")
-all_option.click()
+- `test_krdl_selenium.py` — completion/stall logic, canonical keys, quality filter, size parsing (no network).  
+- `test_core.py`, `test_edge_cases.py` — `csvdl_core` and edge behavior.  
+- `test_integration.py` — lightweight script/help smoke checks.
 
-# Wait for table to reload
-time.sleep(2)
-```
-
-**Why This Matters:**
-- ✅ Ensures we get ALL episodes (not just first 25)
-- ✅ Works for series with 50+ episodes
-- ✅ Handles both "EPISODES & FILMS" and "MISC FILES" tables
-
-### Why Extract Filenames from Table Cells?
-
-**Alternative Considered:** Parse filenames from download URLs.
-
-**Chosen Approach:** Read filename directly from table's first column.
-
-**Reasoning:**
-- ✅ Filenames are already in the HTML
-- ✅ No URL parsing or reconstruction needed
-- ✅ Handles special characters correctly
-- ✅ Matches exactly what Chrome will download
-- ✅ Simpler code, fewer bugs
-
-**Example:**
-```python
-# Get filename from first cell
-filename = cells[0].text.strip()
-# Result: "[GUIS]_Kyouryuu_Sentai_Zyuranger-_01_[018A4A15].mkv"
-
-# Get download URL from last cell
-href = cells[-1].find_element(By.CSS_SELECTOR, "a").get_attribute("href")
-# Result: "https://krdl.moe/download/[GUIS]_Kyouryuu_Sentai_Zyuranger-_01_[018A4A15]/mkv"
-```
-
-### Why Duplicate Checking Before Download?
-
-**Problem:** Re-downloading existing files wastes time and bandwidth.
-
-**Solution:** Scan target directory before starting downloads.
-
-**Implementation:**
-```python
-existing_files = set()
-for file_path in target_dir.glob(f"*.{ext}"):
-    existing_files.add(file_path.name.lower())
-
-for url, filename in download_urls:
-    if filename.lower() in existing_files:
-        skip_download(filename)
-```
-
-**Benefits:**
-- ✅ Instant skip (no network requests)
-- ✅ Resume interrupted sessions
-- ✅ Avoid rate limiting from unnecessary downloads
-- ✅ User-friendly progress messages
-
-## Error Handling
-
-### Rate Limit Detection
-
-**Symptom:** Browser redirects to `/premium` or `/register` page.
-
-**Response:**
-```python
-if "premium" in current_url or "register" in current_url:
-    print("🚨 RATE LIMIT DETECTED - STOPPING DOWNLOADS")
-    print("⏰ Wait 15 minutes before retrying")
-    stop_all_downloads()
-```
-
-**Why This Works:**
-- ✅ Prevents hammering the site
-- ✅ Protects user's account
-- ✅ Clear user messaging
-
-### Authentication Failures
-
-**Detection:** Check URL after login attempt.
-
-**Response:**
-```python
-if "login" in response.url:
-    print("❌ Login failed - check credentials")
-    return False
-```
-
-### Download Failures
-
-**Detection:** Monitor process return codes and file sizes.
-
-**Response:**
-- Partial downloads: Mark as "PAUSED" (can resume)
-- Complete failures: Mark as "FAIL" with error message
-- Continue with remaining downloads
-
-## Performance Considerations
-
-### Why Not Headless by Default?
-
-**Trade-off:** Headless mode is faster but harder to debug.
-
-**Default:** Non-headless (visible browser).
-
-**Reasoning:**
-- ✅ Users can see authentication happening
-- ✅ Easier to diagnose issues
-- ✅ Confidence that it's working
-- ✅ Can add `--headless` flag for automation
-
-### Why 5-Second Sleep Between Checks?
-
-**Balance:** Responsiveness vs. CPU usage.
-
-**Chosen:** 5 seconds between download status checks.
-
-**Reasoning:**
-- Downloads take 5+ minutes each
-- Checking every second is wasteful
-- 5 seconds is responsive enough
-- Reduces CPU usage
-
-## Future Improvements
-
-### Planned Features
-
-1. **TUI (Text User Interface)**
-   - Real-time progress bars
-   - Interactive file selection
-   - Better visual feedback
-
-2. **Resume Capability**
-   - Save download state to disk
-   - Resume from where you left off
-   - Handle interrupted sessions
-
-3. **Batch Processing**
-   - Download multiple series at once
-   - Queue management across sessions
-   - Priority ordering
-
-4. **Smart Retry**
-   - Exponential backoff for failures
-   - Automatic retry on rate limits
-   - Configurable retry strategies
-
-### Potential Optimizations
-
-- **Parallel Scraping:** Scrape multiple show pages simultaneously
-- **Predictive Queueing:** Pre-fetch next downloads while current ones run
-- **Bandwidth Monitoring:** Adjust concurrent downloads based on speed
-- **Smart Scheduling:** Download during off-peak hours
-
-## Security Considerations
-
-### Credential Management
-
-- ✅ Credentials stored in `.env` (gitignored)
-- ✅ Never logged or printed
-- ✅ Environment variable fallback
-- ✅ No hardcoded secrets
-
-### Browser Security
-
-- ✅ Incognito mode for fresh sessions
-- ✅ Automatic cookie clearing
-- ✅ No persistent browser profile
-- ✅ Webdriver detection mitigation
-
-## Testing Strategy
-
-See [Testing Documentation](testing.md) for details on:
-- Unit tests for core functions
-- Integration tests for download flow
-- End-to-end tests with real site
-- Regression tests for known bugs
+There is no separate `testing.md`; use `pytest` and the Contributing guide.
 
 ## Contributing
 
-See [Contributing Guide](../CONTRIBUTING.md) for:
-- Development setup
-- Code style guidelines
-- Pull request process
-- Testing requirements
+See [CONTRIBUTING.md](../CONTRIBUTING.md).

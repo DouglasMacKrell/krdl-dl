@@ -37,10 +37,12 @@ We are committed to providing a welcoming and inclusive environment for all cont
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- **Python 3.9+** (aligned with `pyproject.toml` and CI)
 - Git
 - Google Chrome
 - GitHub account
+
+Default integration branch is **`develop`**; **`main`** may trail or track releases. Base PRs on `develop` unless a maintainer directs otherwise.
 
 ### Finding Issues to Work On
 
@@ -107,9 +109,9 @@ pre-commit run --all-files
 ### 1. Create a Branch
 
 ```bash
-# Update your fork
-git checkout main
-git pull upstream main
+# Update your fork (use develop if that is the integration branch)
+git checkout develop
+git pull upstream develop
 
 # Create a feature branch
 git checkout -b feature/your-feature-name

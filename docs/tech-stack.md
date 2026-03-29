@@ -1,463 +1,79 @@
-# Tech Stack & Dependencies
+# Tech stack & dependencies
 
-Complete overview of the technologies, libraries, and tools used in krdl-dl.
+What krdl-dl runs on and how the repo is wired for development and CI.
 
-## Core Technologies
+## Runtime
 
-### Python 3.8+
+| Piece | Role |
+|-------|------|
+| **Python 3.9+** | Matches `pyproject.toml` (`target-version = "py39"`) and CI matrix |
+| **Google Chrome** | Browser under automation; downloads land in `--target` via prefs |
+| **ChromeDriver** | Supplied by **webdriver-manager** at runtime |
 
-**Why Python?**
-- Excellent web scraping ecosystem
-- Rich library support for automation
-- Easy to read and maintain
-- Cross-platform compatibility
+## Python dependencies (`requirements.txt`)
 
-**Version Requirement:** Python 3.8 or higher
-- Uses modern type hints (Optional, List, etc.)
-- Dataclasses (Python 3.7+)
-- f-strings for formatting
+| Package | Role |
+|---------|------|
+| **selenium** | WebDriver control, page navigation, element queries |
+| **webdriver-manager** | Download/match ChromeDriver to installed Chrome |
+| **python-dotenv** | Load `KRDL_USERNAME` / `KRDL_PASSWORD` from `.env` |
+| **requests** | HTTP in `csvdl_core` (login/scrape helpers, tests) |
+| **beautifulsoup4** | HTML parsing in `csvdl_core` fallback scraper |
 
-### Google Chrome
+Exact minimum versions are pinned in `requirements.txt`.
 
-**Why Chrome?**
-- Most reliable Selenium support
-- Built-in download manager
-- Developer tools for debugging
-- Wide availability across platforms
+## Development (`requirements-dev.txt`)
 
-**Alternatives Considered:**
-- Firefox: Less reliable download handling
-- Safari: Limited automation support
-- Edge: Similar to Chrome but less common
+| Tool | Role |
+|------|------|
+| **pytest** (+ **pytest-asyncio**, **pytest-mock**) | Test runner and fixtures |
+| **pre-commit** | Git hooks |
+| **ruff** | Lint + format (config in `pyproject.toml`) |
 
-## Dependencies
+Install everything for local dev:
 
-### Production Dependencies
-
-#### Selenium (>=4.15.0)
-
-**Purpose:** Browser automation and web scraping
-
-**Key Features Used:**
-- WebDriver for Chrome control
-- Element finding (By.CSS_SELECTOR, By.XPATH)
-- Wait conditions (WebDriverWait, EC)
-- Page navigation and interaction
-
-**Example Usage:**
-```python
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
-driver = webdriver.Chrome(options=chrome_options)
-element = driver.find_element(By.CSS_SELECTOR, "a.download")
-wait = WebDriverWait(driver, 10)
-wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
-```
-
-**Why Selenium 4?**
-- Improved stability
-- Better error messages
-- Native support for Chrome DevTools Protocol
-- Relative locators
-
-#### webdriver-manager (>=4.0.0)
-
-**Purpose:** Automatic ChromeDriver management
-
-**Key Features:**
-- Auto-downloads correct ChromeDriver version
-- Matches installed Chrome version
-- Caches drivers locally
-- Cross-platform support
-
-**Example Usage:**
-```python
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
-
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service)
-```
-
-**Why This Matters:**
-- ✅ No manual ChromeDriver downloads
-- ✅ Always compatible with user's Chrome
-- ✅ Automatic updates
-- ✅ Works on any OS
-
-#### requests (>=2.31.0)
-
-**Purpose:** HTTP requests for authentication and fallback scraping
-
-**Key Features Used:**
-- Session management
-- Cookie handling
-- POST requests (login forms)
-- Custom headers
-
-**Example Usage:**
-```python
-import requests
-
-session = requests.Session()
-response = session.post(login_url, data=login_data, headers=headers)
-cookies = session.cookies
-```
-
-**Why requests?**
-- Industry standard for HTTP in Python
-- Excellent session management
-- Simple, intuitive API
-- Robust error handling
-
-#### BeautifulSoup4 (>=4.12.0)
-
-**Purpose:** HTML parsing for fallback scraper
-
-**Key Features Used:**
-- HTML parsing
-- CSS selector support
-- Tag finding and navigation
-- Text extraction
-
-**Example Usage:**
-```python
-from bs4 import BeautifulSoup
-
-soup = BeautifulSoup(html, 'html.parser')
-tables = soup.find_all('table')
-links = table.find_all('a', class_='download')
-```
-
-**Why BeautifulSoup?**
-- Most popular Python HTML parser
-- Forgiving of malformed HTML
-- Multiple parser backends
-- Excellent documentation
-
-#### python-dotenv (>=1.0.0)
-
-**Purpose:** Environment variable management
-
-**Key Features:**
-- Load variables from `.env` file
-- Override system environment
-- Type conversion support
-
-**Example Usage:**
-```python
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
-username = os.getenv('KRDL_USERNAME')
-password = os.getenv('KRDL_PASSWORD')
-```
-
-**Why dotenv?**
-- ✅ Keeps secrets out of code
-- ✅ Easy local development
-- ✅ Standard practice for credentials
-- ✅ .env file gitignored by default
-
-### Development Dependencies
-
-#### pytest (>=7.0.0)
-
-**Purpose:** Testing framework
-
-**Key Features:**
-- Simple test writing
-- Fixtures for setup/teardown
-- Parametrized tests
-- Rich assertion introspection
-
-**Example Usage:**
-```python
-import pytest
-
-def test_login_success():
-    result = login_to_krdl("user@example.com", "password")
-    assert result is not None
-
-@pytest.fixture
-def mock_driver():
-    driver = Mock()
-    yield driver
-    driver.quit()
-```
-
-**Why pytest?**
-- Most popular Python testing framework
-- Less boilerplate than unittest
-- Excellent plugin ecosystem
-- Great error messages
-
-#### pytest-asyncio (>=0.21.0)
-
-**Purpose:** Async test support
-
-**Usage:** Future-proofing for async operations
-
-**Example:**
-```python
-@pytest.mark.asyncio
-async def test_async_download():
-    result = await async_download_file(url)
-    assert result.status == "DONE"
-```
-
-#### pytest-mock (>=3.10.0)
-
-**Purpose:** Mocking and patching in tests
-
-**Key Features:**
-- Mock objects and functions
-- Spy on calls
-- Patch imports
-- Assertion helpers
-
-**Example Usage:**
-```python
-def test_download_with_mock(mocker):
-    mock_driver = mocker.patch('selenium.webdriver.Chrome')
-    mock_driver.return_value.current_url = "https://krdl.moe/"
-
-    result = download_file(url)
-    assert mock_driver.called
-```
-
-## Future Dependencies
-
-### Planned Additions
-
-#### textual (>=0.58)
-
-**Purpose:** Modern TUI (Text User Interface)
-
-**Features:**
-- Rich terminal UI
-- Real-time progress bars
-- Interactive widgets
-- Responsive layout
-
-**Status:** Commented out in requirements.txt, will be added when TUI is implemented.
-
-#### rich (>=13.7)
-
-**Purpose:** Rich terminal formatting
-
-**Features:**
-- Progress bars
-- Tables
-- Syntax highlighting
-- Markdown rendering
-
-**Status:** Commented out, will be added with TUI.
-
-## System Requirements
-
-### Operating Systems
-
-**Supported:**
-- ✅ macOS 10.15+
-- ✅ Linux (Ubuntu 20.04+, Debian 10+, etc.)
-- ✅ Windows 10+
-
-**Requirements:**
-- Python 3.8+ installed
-- Google Chrome installed
-- Internet connection
-- ~500MB disk space for dependencies
-
-### Hardware Requirements
-
-**Minimum:**
-- 2GB RAM
-- 1GB free disk space (for downloads)
-- Dual-core processor
-
-**Recommended:**
-- 4GB+ RAM
-- 10GB+ free disk space
-- Quad-core processor
-- SSD for faster file operations
-
-## Development Tools
-
-### Version Control
-
-**Git:** Source code management
-- Branch-based workflow
-- Conventional commits
-- Pull request reviews
-
-**GitHub:** Remote repository and CI/CD
-- Issue tracking
-- GitHub Actions for CI
-- Release management
-
-### Code Quality
-
-**Pre-commit Hooks:** (Planned)
-- Code formatting (black)
-- Linting (flake8, pylint)
-- Type checking (mypy)
-- Import sorting (isort)
-
-**CI/CD:** (Planned)
-- Automated testing on push
-- Multi-OS testing (Linux, macOS, Windows)
-- Code coverage reporting
-- Automated releases
-
-### Documentation
-
-**Markdown:** Documentation format
-- Easy to read and write
-- GitHub rendering
-- Version controlled
-
-**Docstrings:** In-code documentation
-- Google-style docstrings
-- Type hints
-- Usage examples
-
-## Dependency Management
-
-### Installation
-
-**pip:** Package installer
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
+pre-commit install
 ```
 
-**Virtual Environment:** Isolation
+## CI (GitHub Actions)
+
+Workflow: `.github/workflows/ci.yml`
+
+1. **pre-commit** job — runs `pre-commit run --all-files` on Python 3.12.  
+2. **test** job — matrix **Python 3.9, 3.11, 3.12** on Ubuntu: `pip install -r requirements-dev.txt` then `python -m pytest tests/`.
+
+Triggers: push and pull request to **`main`** and **`develop`**.
+
+## Code quality
+
+- **Ruff** replaces separate black/flake8/isort for this repo.  
+- Rules under `[tool.ruff.lint]` in `pyproject.toml`; line length 100 with pragmatic `E501` ignore.  
+
+Run manually:
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-.venv\Scripts\activate     # Windows
+ruff check .
+ruff format .
 ```
 
-### Version Pinning
+## Optional / future tooling
 
-**Strategy:** Minimum version requirements
-- `>=` allows patch updates
-- Avoids breaking changes
-- Balances security and stability
+The repo may reference **textual** / **rich** in comments or older docs for a hypothetical TUI—they are **not** required for the current CLI. If a TUI is added, `requirements.txt` would gain those dependencies explicitly.
 
-**Example:**
-```
-selenium>=4.15.0  # Allows 4.15.1, 4.16.0, etc.
-```
+## OS support
 
-### Security Updates
+Developed and tested primarily on **macOS** and **Linux** CI. **Windows** should work with Chrome + Python venv paths adjusted; issues are less frequently exercised in automation.
 
-**Process:**
-1. Dependabot alerts for vulnerabilities
-2. Review and test updates
-3. Update requirements.txt
-4. Run full test suite
-5. Commit and deploy
+## Resource expectations
 
-## Browser Compatibility
+- **Chrome**: on the order of hundreds of MB RAM.  
+- **Disk**: episodes often hundreds of MiB to GiB each; target volume needs free space plus headroom for concurrent `.crdownload` files.  
+- **Network**: bounded by krdl free-tier throughput when downloading.
 
-### ChromeDriver Versions
+## Useful links
 
-**Automatic Management:** webdriver-manager handles versioning
-
-**Compatibility Matrix:**
-| Chrome Version | ChromeDriver Version | Status |
-|---------------|---------------------|--------|
-| 120.x | 120.x | ✅ Tested |
-| 121.x | 121.x | ✅ Tested |
-| 140.x | 140.x | ✅ Current |
-
-### Browser Options
-
-**Configured Options:**
-```python
-chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--window-size=1920,1080")
-```
-
-**Why These Options?**
-- Avoid automation detection
-- Improve stability in containers
-- Consistent window size
-- Better performance
-
-## Performance Considerations
-
-### Memory Usage
-
-**Typical Usage:**
-- Chrome: ~200-300MB
-- Python: ~50-100MB
-- Total: ~250-400MB
-
-**Peak Usage:**
-- During downloads: +500MB per concurrent download
-- Large series: Up to 1-2GB total
-
-### Network Usage
-
-**Bandwidth:**
-- Scraping: Minimal (<1MB)
-- Downloads: 400kbps per file (site limit)
-- Total: ~800kbps for 2 concurrent downloads
-
-**Data Transfer:**
-- Typical episode: 200-300MB
-- Full series (50 episodes): 10-15GB
-- Misc files: 50-700MB each
-
-## Troubleshooting
-
-### Common Issues
-
-**ChromeDriver version mismatch:**
-```bash
-# Clear webdriver-manager cache
-rm -rf ~/.wdm/
-```
-
-**Import errors:**
-```bash
-# Reinstall dependencies
-pip install --force-reinstall -r requirements.txt
-```
-
-**Selenium errors:**
-```bash
-# Update Chrome to latest version
-# Restart terminal/IDE
-# Check Chrome is in PATH
-```
-
-## Resources
-
-### Official Documentation
-
-- [Selenium Docs](https://www.selenium.dev/documentation/)
-- [Python Docs](https://docs.python.org/3/)
-- [pytest Docs](https://docs.pytest.org/)
-- [BeautifulSoup Docs](https://www.crummy.com/software/BeautifulSoup/bs4/doc/)
-
-### Community Resources
-
-- [Selenium Python Bindings](https://selenium-python.readthedocs.io/)
-- [Real Python Tutorials](https://realpython.com/)
-- [Stack Overflow](https://stackoverflow.com/questions/tagged/selenium)
-
-### Related Projects
-
-- [youtube-dl](https://github.com/ytdl-org/youtube-dl) - Video downloader
-- [gallery-dl](https://github.com/mikf/gallery-dl) - Image gallery downloader
-- [scrapy](https://scrapy.org/) - Web scraping framework
+- [Selenium documentation](https://www.selenium.dev/documentation/)  
+- [Ruff](https://docs.astral.sh/ruff/)  
+- [pytest](https://docs.pytest.org/)  

@@ -1,138 +1,119 @@
-# Quickstart Guide
+# Quickstart
 
-Get up and running with krdl-dl in under 5 minutes!
+Get **krdl-dl** running in a few minutes.
 
 ## Prerequisites
 
-- Python 3.8 or higher
-- Google Chrome browser installed
-- krdl.moe account (free or premium)
+- **Python 3.9+**
+- **Google Chrome** installed
+- A **krdl.moe** account
 
-## Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/DouglasMacKrell/krdl-dl.git
-   cd krdl-dl
-   ```
-
-2. **Create a virtual environment:**
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Set up your credentials:**
-
-   Create a `.env` file in the project root:
-   ```bash
-   KRDL_USERNAME=your_email@example.com
-   KRDL_PASSWORD=your_password
-   ```
-
-## Basic Usage
-
-### Download a complete series
+## Install
 
 ```bash
-python3 krdl_selenium.py \
-  --url "https://krdl.moe/show/kyouryuu-sentai-zyuranger" \
-  --target "/path/to/download/folder" \
-  --ext mkv
+git clone https://github.com/DouglasMacKrell/krdl-dl.git
+cd krdl-dl
+python3 -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### Download only MP4 files
+## Credentials
 
-```bash
-python3 krdl_selenium.py \
-  --url "https://krdl.moe/show/choujin-sentai-jetman" \
-  --target "/path/to/download/folder" \
-  --ext mp4
+Create `.env` in the repo root:
+
+```
+KRDL_USERNAME=your_email@example.com
+KRDL_PASSWORD=your_password
 ```
 
-### Test with limited downloads
+Never commit `.env` (it is listed in `.gitignore`).
+
+## First download
+
+Replace the URL with any **show** page on krdl (e.g. `https://krdl.moe/show/…`).
 
 ```bash
 python3 krdl_selenium.py \
   --url "https://krdl.moe/show/kyouryuu-sentai-zyuranger" \
   --target "/path/to/download/folder" \
   --ext mkv \
-  --limit 3
+  --quality hd
 ```
 
-## Command-Line Arguments
+- **`--ext`**: only `mkv` or `mp4` links from the table are collected.  
+- **`--quality hd`** (default): for each **episode number** (or movie key) found in filenames, the script keeps the row with the **largest** size reported in the table; if sizes tie, it prefers filenames containing `_HD_`. If only one rip exists for that episode, it is used.  
+- **`--quality sd`**: prefers **smaller** sizes (and ties toward names **without** `_HD_`), still falling back when only one row exists.
 
-| Argument | Required | Description | Default |
-|----------|----------|-------------|---------|
-| `--url` | Yes | URL of the krdl.moe show page | - |
-| `--target` | Yes | Directory to save downloads | - |
-| `--ext` | No | File extension to download (`mkv` or `mp4`) | `mkv` |
-| `--limit` | No | Limit number of downloads (for testing) | None |
-| `--username` | No | krdl.moe username (overrides .env) | From .env |
-| `--password` | No | krdl.moe password (overrides .env) | From .env |
-| `--headless` | No | Run browser in headless mode | False |
+## MP4 only
 
-## How It Works
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/choujin-sentai-jetman" \
+  --target "/path/to/folder" \
+  --ext mp4 \
+  --quality hd
+```
 
-1. **Login**: Authenticates with krdl.moe using your credentials
-2. **Scrape**: Navigates to the show page and extracts all download links
-3. **Filter**: Filters links by your chosen extension (mkv or mp4)
-4. **Dedupe**: Checks target directory and skips existing files
-5. **Queue**: Downloads up to 2 files concurrently (respects site limits)
-6. **Monitor**: Tracks `.crdownload` files and waits for completion
-7. **Complete**: Files are automatically saved to your target directory
+## Safer pacing
 
-## Important Notes
+If the site starts redirecting you to register/premium after many files, increase the delay **between** starting new jobs once a slot frees:
 
-### Rate Limiting
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/…" \
+  --target "/path/to/folder" \
+  --ext mkv \
+  --stagger-seconds 60
+```
 
-krdl.moe has strict rate limits for free users:
-- **400kbps** per file download speed
-- **2 concurrent downloads** maximum
-- **~5 minutes** per file (for typical episode sizes)
+## Smoke test with `--limit`
 
-**⚠️ Exceeding these limits will temporarily restrict your account!**
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/kyouryuu-sentai-zyuranger" \
+  --target "/path/to/test-folder" \
+  --ext mkv \
+  --limit 2
+```
 
-The downloader automatically respects these limits by:
-- Only running 2 downloads at once
-- Waiting for downloads to complete before starting new ones
-- Gracefully stopping if redirected to premium/register page
+`--limit` applies **after** skipping files that already exist in `--target`.
 
-### File Management
+## Common CLI flags
 
-- Files download directly to your specified `--target` directory
-- Chrome creates temporary `.crdownload` files during download
-- Files are automatically renamed when complete
-- Duplicate files are skipped (checks filename match)
+| Flag | Purpose |
+|------|---------|
+| `--url` | Show page URL (required) |
+| `--target` | Output directory (required) |
+| `--ext` | `mkv` or `mp4` |
+| `--quality` | `hd` or `sd` |
+| `--stagger-seconds` | Pause before each new start after a slot opens (default `15`) |
+| `--limit` | Max new downloads this run |
+| `--headless` | Headless Chrome |
+| `--username` / `--password` | Override `.env` |
 
-### Troubleshooting
+Full list: `python3 krdl_selenium.py --help` or the root [README](../README.md).
 
-**"No credentials provided" error:**
-- Make sure your `.env` file exists and has correct credentials
-- Or pass `--username` and `--password` directly
+## What to expect
 
-**Downloads not starting:**
-- Check that Chrome is installed
-- Verify your krdl.moe credentials are correct
-- Make sure you're not already rate-limited
+1. A Chrome window opens (unless `--headless`), logs in, opens the show page.  
+2. Pagination is set to **All** so every table row is visible.  
+3. The script builds a queue, skips names that already exist as finished `*.{ext}`, then downloads with **at most two** active transfers.  
+4. Interrupted runs: **stale `.crdownload` files are not treated as completed episodes**—re-run to retry. A matching partial is removed when a job starts if the final file is still missing.
 
-**Browser doesn't open:**
-- Add `--headless False` to see the browser window
-- Useful for debugging authentication issues
+## Troubleshooting
 
-## Next Steps
+| Problem | Things to check |
+|---------|-----------------|
+| “No credentials” | `.env` in project root, or pass `--username` / `--password` |
+| Premium/register redirect | Cool off (often 15+ minutes); increase `--stagger-seconds`; do not run two downloads on the same account in parallel |
+| Browser / login | Run without `--headless` and watch the window |
+| Wrong rip chosen | Use `--quality sd` or inspect table sizes on krdl; only the chosen `--ext` is compared |
 
-- Read the [Architecture Guide](architecture.md) to understand how it works
-- Check out [Tech Stack](tech-stack.md) for dependency details
-- See [Contributing Guide](../CONTRIBUTING.md) for development setup
+## Next steps
 
-## Need Help?
+- [Architecture](architecture.md) — pipeline and design trade‑offs  
+- [Tech stack](tech-stack.md) — dependencies and CI  
+- [Contributing](../CONTRIBUTING.md) — dev setup  
 
-- Open an issue on [GitHub](https://github.com/DouglasMacKrell/krdl-dl/issues)
-- Check existing issues for similar problems
-- Include error messages and your command in the issue
+Need help? Open an [issue](https://github.com/DouglasMacKrell/krdl-dl/issues) with the exact command and message you see.
