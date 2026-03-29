@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/readme-header.png" alt="Digital illustration of Red, Blue, Yellow, and Pink Power Rangers in a tug-of-war, trying to save the Pink Ranger from being sucked into a giant, monstrous computer folder vortex." width="720">
+</p>
+
 # krdl-dl
 
 A Selenium-based automated downloader for [krdl.moe](https://krdl.moe) (tokusatsu archive). Log in with your account, scrape a show page, dedupe episodes by quality, and download with a two-slot queue that matches the site’s free-tier rules.
