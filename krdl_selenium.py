@@ -6,9 +6,11 @@ Uses browser automation to handle JavaScript and complex authentication
 
 import argparse
 import os
+import re
 import time
 import unicodedata
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -36,6 +38,119 @@ def _normalize_download_basename(name: str) -> str:
     for ch in ("\u00a0", "\u2007", "\u202f", "\ufeff"):
         t = t.replace(ch, " ")
     return t
+
+
+def _parse_krdl_size_bytes(size_cell: str) -> int | None:
+    """
+    Parse KRDL table size text (e.g. '244.85 MiB', '1.19 GiB') to bytes. Unknown shapes → None.
+    """
+    t = _normalize_download_basename(size_cell).strip()
+    if not t:
+        return None
+    m = re.match(r"^([\d.]+)\s*(KiB|MiB|GiB|TiB|KB|MB|GB)\s*$", t, re.I)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    unit = m.group(2).lower()
+    mult = {
+        "kib": 1024,
+        "mib": 1024**2,
+        "gib": 1024**3,
+        "tib": 1024**4,
+        "kb": 1000,
+        "mb": 1000**2,
+        "gb": 1000**3,
+    }.get(unit)
+    if mult is None:
+        return None
+    return int(val * mult)
+
+
+def _is_hd_filename(filename: str) -> bool:
+    return bool(re.search(r"(?i)_HD_", _normalize_download_basename(filename)))
+
+
+def _canonical_episode_key(filename: str) -> str:
+    """
+    Map a table filename to a logical episode / special key so HD vs SD rows dedupe.
+    Unknown shapes get a per-filename key (no cross-row dedupe).
+    """
+    n = _normalize_download_basename(filename)
+    if (
+        re.search(r"(?i)(The_)?Movie.*_HD_", n)
+        or re.search(r"(?i)_Movie_\s*\[", n)
+        or re.search(r"(?i)_The_Movie_", n)
+    ):
+        return "movie"
+    m = re.search(r"(?i)_Ep0*(\d+)_", n)
+    if m:
+        return f"ep:{int(m.group(1)):03d}"
+    m = re.search(r"(?i)_-_(\d{2,3})_", n)
+    if m:
+        return f"ep:{int(m.group(1)):03d}"
+    m = re.search(r"(?i)_(\d{1,3})_\[[0-9a-fA-F]{6,12}\]", n)
+    if m:
+        return f"ep:{int(m.group(1)):03d}"
+    return f"unique:{n}"
+
+
+ScrapeRow = tuple[str, str, int | None]
+
+
+def filter_by_quality_preference(
+    download_items: list[ScrapeRow],
+    prefer: Literal["hd", "sd"],
+) -> list[ScrapeRow]:
+    """
+    For each canonical episode key, keep one table row. Uses KRDL file size as the main signal
+    (larger = better for prefer='hd', smaller for prefer='sd'); ``_HD_`` in the filename breaks ties.
+    Unknown sizes sort last for 'hd' (lose to known sizes) and last for 'sd' (lose to known small).
+    """
+    key_order: list[str] = []
+    groups: dict[str, list[tuple[str, str, int | None, bool]]] = {}
+    for url, fn, size_b in download_items:
+        key = _canonical_episode_key(fn)
+        if key not in groups:
+            key_order.append(key)
+            groups[key] = []
+        groups[key].append((url, fn, size_b, _is_hd_filename(fn)))
+
+    result: list[ScrapeRow] = []
+    dropped = 0
+    for key in key_order:
+        g = groups[key]
+        if prefer == "hd":
+            chosen = max(
+                g,
+                key=lambda r: (
+                    r[2] if r[2] is not None else -1,
+                    1 if r[3] else 0,
+                ),
+            )
+        else:
+            chosen = min(
+                g,
+                key=lambda r: (
+                    r[2] if r[2] is not None else float("inf"),
+                    1 if r[3] else 0,
+                ),
+            )
+        result.append((chosen[0], chosen[1], chosen[2]))
+        dropped += len(g) - 1
+
+    if dropped:
+        print(
+            f"🎯 Quality preference {prefer!r} (size-primary, _HD_ tiebreak): dropped {dropped} "
+            f"duplicate episode row(s) ({len(download_items)} → {len(result)} files)"
+        )
+    else:
+        print(
+            f"🎯 Quality preference {prefer!r}: no duplicate keys in scrape ({len(result)} files)"
+        )
+    return result
 
 
 class KrdlSeleniumDownloader:
@@ -264,8 +379,8 @@ class KrdlSeleniumDownloader:
             print(f"❌ Login failed: {e}")
             return False
 
-    def scrape_download_links(self, show_url: str, extension: str = "mkv") -> list:
-        """Scrape download links from show page"""
+    def scrape_download_links(self, show_url: str, extension: str = "mkv") -> list[ScrapeRow]:
+        """Scrape download links from show page; each row is (url, filename, size_bytes | None)."""
         try:
             print(f"🌐 Scraping krdl.moe page: {show_url}")
 
@@ -329,6 +444,8 @@ class KrdlSeleniumDownloader:
                         # Get the filename from first cell
                         filename_cell = cells[0]
                         filename = filename_cell.text.strip()
+                        size_cell = cells[1].text.strip() if len(cells) >= 2 else ""
+                        size_b = _parse_krdl_size_bytes(size_cell)
 
                         # Get the download link from last cell
                         link_cell = cells[-1]
@@ -337,9 +454,9 @@ class KrdlSeleniumDownloader:
                             href = download_link.get_attribute("href")
 
                             if href and "/download/" in href and f"/{extension}" in href:
-                                # Store as tuple: (url, filename)
-                                download_links.append((href, filename))
-                                print(f"🔍 Found: {filename}")
+                                download_links.append((href, filename, size_b))
+                                sz_dbg = f"{size_b:,} B" if size_b is not None else "size?"
+                                print(f"🔍 Found: {filename} ({sz_dbg})")
                         except Exception:
                             pass
 
@@ -524,6 +641,14 @@ class KrdlSeleniumDownloader:
 
             # Navigate to download URL to start download
             print("🔍 Navigating to download URL...")
+            out_expected = self.target_dir / job.name
+            stale_partial = self.target_dir / f"{job.name}.crdownload"
+            if stale_partial.is_file() and not out_expected.is_file():
+                try:
+                    stale_partial.unlink()
+                    print(f"🧹 Removed stale partial so Chrome can retry: {stale_partial.name}")
+                except OSError as e:
+                    print(f"⚠️  Could not remove stale partial {stale_partial.name}: {e}")
             cr_before = frozenset(self._crdownload_basenames())
             self.driver.get(job.url)
             time.sleep(3)  # Let redirect / download handoff settle (was 2s; krdl is sensitive)
@@ -896,6 +1021,17 @@ def main():
         default="mkv",
         help="Which video extension to download (default: mkv)",
     )
+    ap.add_argument(
+        "--quality",
+        choices=["hd", "sd"],
+        default="hd",
+        help=(
+            "Per episode (canonical numbering), pick one table row: hd = largest file size from "
+            "KRDL, tie-breaking with _HD_ in the filename (fills gaps with whatever size exists); "
+            "sd = smallest size, tie-breaking toward non-HD names, falling back when only large/HD "
+            "files exist."
+        ),
+    )
     ap.add_argument("--headless", action="store_true", help="Run browser in headless mode")
     ap.add_argument("--username", help="krdl.moe username for authentication")
     ap.add_argument("--password", help="krdl.moe password for authentication")
@@ -953,6 +1089,7 @@ def main():
 
         # Scrape download links
         download_urls = downloader.scrape_download_links(args.url, args.ext)
+        download_urls = filter_by_quality_preference(download_urls, args.quality)
 
         if not download_urls:
             print("❌ No download links found on the page")
@@ -962,22 +1099,18 @@ def main():
         print("🔍 Checking for existing files to avoid duplicates...")
         existing_files = set()
 
-        # Get all existing .mkv files
+        # Only treat finished rips as duplicates. Do NOT skip because of *.crdownload: after a
+        # failed or interrupted run Chrome often deletes the partial, but if a stale .crdownload
+        # remains, treating it as "already have this episode" skips the job forever with no .mkv.
         for file_path in target_dir.glob(f"*.{args.ext}"):
             existing_files.add(file_path.name.lower())
 
-        # Get all existing .crdownload files (in-progress downloads)
-        for file_path in target_dir.glob("*.crdownload"):
-            base_name = file_path.name.replace(".crdownload", "")
-            existing_files.add(base_name.lower())
-
-        print(f"🔍 Found {len(existing_files)} existing files in target directory")
+        print(f"🔍 Found {len(existing_files)} existing {args.ext!r} files in target directory")
 
         # Filter out URLs that would create duplicates BEFORE starting downloads
-        # download_urls is now a list of tuples: (url, filename)
-        # NOTE: filename from table already includes extension like .mkv
+        # download_urls is (url, filename, expected_bytes | None)
         filtered_items = []
-        for url, filename in download_urls:
+        for url, filename, expected_bytes in download_urls:
             # Filename already has extension from table
             base_name = filename.lower()
 
@@ -994,15 +1127,21 @@ def main():
                 print(f"⏭️  Skipping {filename} - similar file exists: {potential_conflicts[0]}")
                 continue
 
-            filtered_items.append((url, filename))
+            filtered_items.append((url, filename, expected_bytes))
 
         print(f"📊 After duplicate check: {len(filtered_items)} downloads to start")
 
         # Prepare jobs with filtered URLs and filenames
         print(f"📁 Preparing jobs for {args.ext} files...")
         jobs = []
-        for url, filename in filtered_items:
-            job = Job(url=url, name=filename, out_path=target_dir / filename, status="QUEUED")
+        for url, filename, expected_bytes in filtered_items:
+            job = Job(
+                url=url,
+                name=filename,
+                out_path=target_dir / filename,
+                status="QUEUED",
+                expected_bytes=expected_bytes,
+            )
             jobs.append(job)
 
         # Apply limit to the number of downloads (not the filtered list)

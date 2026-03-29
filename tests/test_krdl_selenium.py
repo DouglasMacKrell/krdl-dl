@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 
 from csvdl_core import Job
-from krdl_selenium import KrdlSeleniumDownloader
+from krdl_selenium import (
+    KrdlSeleniumDownloader,
+    _canonical_episode_key,
+    _is_hd_filename,
+    _parse_krdl_size_bytes,
+    filter_by_quality_preference,
+)
+
+_MIB = 1024**2
 
 
 @pytest.fixture
@@ -168,3 +176,123 @@ class TestAbandonStalled:
         }
         assert dl._should_abandon_stalled_download(info) is True
         assert job.status == "FAIL"
+
+
+class TestCanonicalEpisodeKey:
+    def test_battle_fever_sd_and_hd_share_episode_key(self):
+        sd = "[BernSubs]Battle_Fever_J_41_[DFCDCDCD].mkv"
+        hd = "[BernSubs]_Battle_Fever_J_Ep41_HD_[33c10c6f].mkv"
+        assert _canonical_episode_key(sd) == _canonical_episode_key(hd) == "ep:041"
+
+    def test_nemet_dash_number_same_key_as_bern(self):
+        n = "[Nemet]_Battle_Fever_J_-_01_[141b608a].mkv"
+        b = "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv"
+        assert _canonical_episode_key(n) == _canonical_episode_key(b) == "ep:001"
+
+    def test_movie_sd_and_hd_same_key(self):
+        sd = "[BernSubs]Battle_Fever_J_Movie_[9AAFA9C5].mkv"
+        hd = "[BernSubs]_Battle_Fever_J_The_Movie_HD_[8d42921e].mkv"
+        assert _canonical_episode_key(sd) == _canonical_episode_key(hd) == "movie"
+
+    def test_sun_vulcan_movie_variants_same_key(self):
+        gsf = "[GSF!]_Taiyo_Sentai_Sun_Vulcan_The_Movie_v2_[ae014c07].mkv"
+        zichz = "[Zichz_Scrubbed]_Solar_Sentai_Sun_Vulcan_The_Movie_1080p_[d1ff7205].mkv"
+        assert _canonical_episode_key(gsf) == _canonical_episode_key(zichz) == "movie"
+
+    def test_unknown_named_gets_unique_keys(self):
+        a = "[SomeGroup]_Weird_Release.mkv"
+        b = "[SomeGroup]_Other_Stuff.mkv"
+        assert _canonical_episode_key(a) != _canonical_episode_key(b)
+
+
+class TestIsHdFilename:
+    def test_hd_tag(self):
+        assert _is_hd_filename("[BernSubs]_Battle_Fever_J_Ep41_HD_[x].mkv") is True
+
+    def test_sd_not_hd(self):
+        assert _is_hd_filename("[BernSubs]Battle_Fever_J_41_[DFCDCDCD].mkv") is False
+
+
+class TestParseKrdlSizeBytes:
+    def test_mib(self):
+        assert _parse_krdl_size_bytes("244.85 MiB") == int(244.85 * _MIB)
+
+    def test_gib(self):
+        assert _parse_krdl_size_bytes("1.19 GiB") == int(1.19 * 1024**3)
+
+    def test_plain_mib(self):
+        assert _parse_krdl_size_bytes("304 MiB") == 304 * _MIB
+
+    def test_unknown_returns_none(self):
+        assert _parse_krdl_size_bytes("n/a") is None
+
+
+class TestFilterByQualityPreference:
+    def test_prefers_larger_file_for_hd_mode(self):
+        rows = [
+            ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB),
+            ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB),
+        ]
+        out = filter_by_quality_preference(rows, "hd")
+        assert out == [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB)]
+
+    def test_larger_non_hd_beats_smaller_hd(self):
+        """Site-reported size overrides misleading filenames."""
+        rows = [
+            ("u_big", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 700 * _MIB),
+            ("u_small", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 300 * _MIB),
+        ]
+        out = filter_by_quality_preference(rows, "hd")
+        assert out == [("u_big", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 700 * _MIB)]
+
+    def test_same_size_prefers_hd_marker(self):
+        sz = 600 * _MIB
+        rows = [
+            ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", sz),
+            ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", sz),
+        ]
+        out = filter_by_quality_preference(rows, "hd")
+        assert out == [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", sz)]
+
+    def test_prefers_smaller_file_for_sd_mode(self):
+        rows = [
+            ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB),
+            ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB),
+        ]
+        out = filter_by_quality_preference(rows, "sd")
+        assert out == [("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB)]
+
+    def test_falls_back_to_sd_when_no_hd(self):
+        rows = [("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB)]
+        out = filter_by_quality_preference(rows, "hd")
+        assert out == rows
+
+    def test_falls_back_to_hd_when_no_sd(self):
+        rows = [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB)]
+        out = filter_by_quality_preference(rows, "sd")
+        assert out == rows
+
+    def test_sd_among_two_non_hd_picks_smaller(self):
+        rows = [
+            ("u_sd", "[BernSubs]Battle_Fever_J_05_[aaaaaaaa].mkv", 280 * _MIB),
+            ("u_nm", "[Nemet]_Battle_Fever_J_-_05_[bbbbbbbb].mkv", 320 * _MIB),
+        ]
+        out = filter_by_quality_preference(rows, "sd")
+        assert out == [("u_sd", "[BernSubs]Battle_Fever_J_05_[aaaaaaaa].mkv", 280 * _MIB)]
+
+    def test_three_way_hd_picks_largest(self):
+        rows = [
+            ("u_sd", "[BernSubs]Battle_Fever_J_07_[aaaaaaaa].mkv", 250 * _MIB),
+            ("u_nm", "[Nemet]_Battle_Fever_J_-_07_[bbbbbbbb].mkv", 320 * _MIB),
+            ("u_hd", "[BernSubs]_Battle_Fever_J_Ep07_HD_[cccccccc].mkv", 650 * _MIB),
+        ]
+        out = filter_by_quality_preference(rows, "hd")
+        assert out == [("u_hd", "[BernSubs]_Battle_Fever_J_Ep07_HD_[cccccccc].mkv", 650 * _MIB)]
+
+    def test_unknown_size_loses_to_known_for_hd(self):
+        rows = [
+            ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", None),
+            ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 100 * _MIB),
+        ]
+        out = filter_by_quality_preference(rows, "hd")
+        assert out == [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 100 * _MIB)]
