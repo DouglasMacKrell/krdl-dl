@@ -12,6 +12,8 @@ from krdl_selenium import (
     _canonical_episode_key,
     _is_hd_filename,
     _parse_krdl_size_bytes,
+    build_gap_fill_rows,
+    discover_canonical_keys_on_disk,
     filter_by_quality_preference,
 )
 
@@ -179,6 +181,11 @@ class TestAbandonStalled:
 
 
 class TestCanonicalEpisodeKey:
+    def test_changeman_tkp_and_guis_share_episode_keys(self):
+        tkp = "[TKP]_Dengeki_Sentai_Changeman_-_02_v2_[9f268995].mkv"
+        guis = "[G.U.I.S.]_Dengeki_Sentai_Changeman_02_[0833B2A3].mkv"
+        assert _canonical_episode_key(tkp) == _canonical_episode_key(guis) == "ep:002"
+
     def test_battle_fever_sd_and_hd_share_episode_key(self):
         sd = "[BernSubs]Battle_Fever_J_41_[DFCDCDCD].mkv"
         hd = "[BernSubs]_Battle_Fever_J_Ep41_HD_[33c10c6f].mkv"
@@ -233,7 +240,7 @@ class TestFilterByQualityPreference:
             ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB),
             ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB),
         ]
-        out = filter_by_quality_preference(rows, "hd")
+        out, _ranked = filter_by_quality_preference(rows, "hd")
         assert out == [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB)]
 
     def test_larger_non_hd_beats_smaller_hd(self):
@@ -242,7 +249,7 @@ class TestFilterByQualityPreference:
             ("u_big", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 700 * _MIB),
             ("u_small", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 300 * _MIB),
         ]
-        out = filter_by_quality_preference(rows, "hd")
+        out, _ranked = filter_by_quality_preference(rows, "hd")
         assert out == [("u_big", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 700 * _MIB)]
 
     def test_same_size_prefers_hd_marker(self):
@@ -251,7 +258,7 @@ class TestFilterByQualityPreference:
             ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", sz),
             ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", sz),
         ]
-        out = filter_by_quality_preference(rows, "hd")
+        out, _ranked = filter_by_quality_preference(rows, "hd")
         assert out == [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", sz)]
 
     def test_prefers_smaller_file_for_sd_mode(self):
@@ -259,17 +266,17 @@ class TestFilterByQualityPreference:
             ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB),
             ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB),
         ]
-        out = filter_by_quality_preference(rows, "sd")
+        out, _ranked = filter_by_quality_preference(rows, "sd")
         assert out == [("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB)]
 
     def test_falls_back_to_sd_when_no_hd(self):
         rows = [("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", 250 * _MIB)]
-        out = filter_by_quality_preference(rows, "hd")
+        out, _ranked = filter_by_quality_preference(rows, "hd")
         assert out == rows
 
     def test_falls_back_to_hd_when_no_sd(self):
         rows = [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 600 * _MIB)]
-        out = filter_by_quality_preference(rows, "sd")
+        out, _ranked = filter_by_quality_preference(rows, "sd")
         assert out == rows
 
     def test_sd_among_two_non_hd_picks_smaller(self):
@@ -277,7 +284,7 @@ class TestFilterByQualityPreference:
             ("u_sd", "[BernSubs]Battle_Fever_J_05_[aaaaaaaa].mkv", 280 * _MIB),
             ("u_nm", "[Nemet]_Battle_Fever_J_-_05_[bbbbbbbb].mkv", 320 * _MIB),
         ]
-        out = filter_by_quality_preference(rows, "sd")
+        out, _ranked = filter_by_quality_preference(rows, "sd")
         assert out == [("u_sd", "[BernSubs]Battle_Fever_J_05_[aaaaaaaa].mkv", 280 * _MIB)]
 
     def test_three_way_hd_picks_largest(self):
@@ -286,7 +293,7 @@ class TestFilterByQualityPreference:
             ("u_nm", "[Nemet]_Battle_Fever_J_-_07_[bbbbbbbb].mkv", 320 * _MIB),
             ("u_hd", "[BernSubs]_Battle_Fever_J_Ep07_HD_[cccccccc].mkv", 650 * _MIB),
         ]
-        out = filter_by_quality_preference(rows, "hd")
+        out, _ranked = filter_by_quality_preference(rows, "hd")
         assert out == [("u_hd", "[BernSubs]_Battle_Fever_J_Ep07_HD_[cccccccc].mkv", 650 * _MIB)]
 
     def test_unknown_size_loses_to_known_for_hd(self):
@@ -294,5 +301,51 @@ class TestFilterByQualityPreference:
             ("u1", "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv", None),
             ("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 100 * _MIB),
         ]
-        out = filter_by_quality_preference(rows, "hd")
+        out, _ranked = filter_by_quality_preference(rows, "hd")
         assert out == [("u2", "[BernSubs]_Battle_Fever_J_Ep01_HD_[eb30230c].mkv", 100 * _MIB)]
+
+    def test_hd_prefers_higher_v_over_larger_base_file(self):
+        base = ("ub", "[MF]_Choushinsei_Flashman_01_[0b7b8f86].mkv", 500 * _MIB)
+        v2 = ("uv", "[MF]_Choushinsei_Flashman_01_v2_[d270d850].mkv", 100 * _MIB)
+        out, _ranked = filter_by_quality_preference([base, v2], "hd")
+        assert out == [v2]
+
+    def test_hd_prefers_v3_over_v2_when_both_versioned(self):
+        v2 = ("u2", "[X]_Show_01_v2_[aaaaaaaa].mkv", 400 * _MIB)
+        v3 = ("u3", "[X]_Show_01_v3_[bbbbbbbb].mkv", 200 * _MIB)
+        out, _ranked = filter_by_quality_preference([v2, v3], "hd")
+        assert out == [v3]
+
+    def test_sd_prefers_higher_v_then_smaller_size(self):
+        base = ("ub", "[X]_Show_01_[aaaaaaaa].mkv", 100 * _MIB)
+        v2 = ("uv", "[X]_Show_01_v2_[bbbbbbbb].mkv", 300 * _MIB)
+        out, _ranked = filter_by_quality_preference([base, v2], "sd")
+        assert out == [v2]
+
+    def test_sd_same_version_prefers_smaller_file(self):
+        a = ("a", "[X]_Show_01_[aaaaaaaa].mkv", 200 * _MIB)
+        b = ("b", "[X]_Show_01_[bbbbbbbb].mkv", 100 * _MIB)
+        out, _ranked = filter_by_quality_preference([a, b], "sd")
+        assert out == [b]
+
+    def test_changeman_hd_prefers_larger_tkp_over_guis(self):
+        """Site sizes from KRDL: TKP ep02 MKV is larger than G.U.I.S."""
+        tkp = ("utk2", "[TKP]_Dengeki_Sentai_Changeman_-_02_v2_[9f268995].mkv", int(294.75 * _MIB))
+        guis = ("ug2", "[G.U.I.S.]_Dengeki_Sentai_Changeman_02_[0833B2A3].mkv", int(291.38 * _MIB))
+        out, ranked = filter_by_quality_preference([guis, tkp], "hd")
+        assert out == [tkp]
+        assert ranked["ep:002"][0] == tkp
+        assert ranked["ep:002"][1] == guis
+
+    def test_gap_fill_queues_second_release_when_key_missing_on_disk(self, tmp_path):
+        tkp = ("utk2", "[TKP]_Dengeki_Sentai_Changeman_-_02_v2_[9f268995].mkv", int(294.75 * _MIB))
+        guis = ("ug2", "[G.U.I.S.]_Dengeki_Sentai_Changeman_02_[0833B2A3].mkv", int(291.38 * _MIB))
+        t01 = ("u1", "[TKP]_Dengeki_Sentai_Changeman_-_01_v2_[c251747e].mkv", int(293 * _MIB))
+        _o, ranked = filter_by_quality_preference([t01, tkp, guis], "hd")
+        # Simulate episode 01 on disk only; ep002 missing
+        f01 = tmp_path / "[TKP]_Dengeki_Sentai_Changeman_-_01_v2_[c251747e].mkv"
+        f01.write_bytes(b"x")
+        gap = build_gap_fill_rows(ranked, tmp_path, "mkv")
+        assert len(gap) == 1
+        assert gap[0][1] == guis[1]
+        assert discover_canonical_keys_on_disk(tmp_path, "mkv") == {"ep:001"}

@@ -75,6 +75,18 @@ def _is_hd_filename(filename: str) -> bool:
     return bool(re.search(r"(?i)_HD_", _normalize_download_basename(filename)))
 
 
+def _release_version_counter(filename: str) -> int:
+    """
+    Numeric suffix from ``..._vN_[crc]`` before the bracket hash (KRDL-style). Base releases
+    (no ``_vN_``) return 0 so ``v2`` sorts above unversioned.
+    """
+    n = _normalize_download_basename(filename)
+    m = re.search(r"(?i)_v(\d+)_\[[0-9a-fA-F]{6,12}\]", n)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
 def _canonical_episode_key(filename: str) -> str:
     """
     Map a table filename to a logical episode / special key so HD vs SD rows dedupe.
@@ -93,7 +105,7 @@ def _canonical_episode_key(filename: str) -> str:
     m = re.search(r"(?i)_-_(\d{2,3})_", n)
     if m:
         return f"ep:{int(m.group(1)):03d}"
-    m = re.search(r"(?i)_(\d{1,3})_\[[0-9a-fA-F]{6,12}\]", n)
+    m = re.search(r"(?i)_(\d{1,3})_(?:v\d+_)?\[[0-9a-fA-F]{6,12}\]", n)
     if m:
         return f"ep:{int(m.group(1)):03d}"
     return f"unique:{n}"
@@ -103,14 +115,33 @@ def _canonical_episode_key(filename: str) -> str:
 ScrapeRow = Tuple[str, str, Optional[int]]  # noqa: UP006
 
 
+def _quality_rows_hd_sort_key(r: tuple[str, str, int | None, bool]) -> tuple[int, int | float, int]:
+    url, fn, size_b, is_h = r
+    v = _release_version_counter(fn)
+    s = size_b if size_b is not None else -1
+    return (v, s, 1 if is_h else 0)
+
+
+def _quality_rows_sd_sort_key(r: tuple[str, str, int | None, bool]) -> tuple[int, float, int]:
+    url, fn, size_b, is_h = r
+    v = _release_version_counter(fn)
+    s = size_b if size_b is not None else float("inf")
+    return (-v, s, 1 if is_h else 0)
+
+
 def filter_by_quality_preference(
     download_items: list[ScrapeRow],
     prefer: Literal["hd", "sd"],
-) -> list[ScrapeRow]:
+) -> tuple[list[ScrapeRow], dict[str, list[ScrapeRow]]]:
     """
-    For each canonical episode key, keep one table row. Uses KRDL file size as the main signal
-    (larger = better for prefer='hd', smaller for prefer='sd'); ``_HD_`` in the filename breaks ties.
-    Unknown sizes sort last for 'hd' (lose to known sizes) and last for 'sd' (lose to known small).
+    For each canonical episode key, keep one table row. Prefer the **highest ``_vN_``** release
+    (``v2`` over base) when present; then KRDL size (larger for ``hd``, smaller for ``sd``);
+    ``_HD_`` in the filename breaks remaining ties. Unknown sizes sort last for ``hd`` and for
+    ``sd``.
+
+    Returns primary picks plus ``ranked_by_key``: for each canonical key, all rows for that key
+    sorted best-first (same order as the winner). Used to queue alternate releases when the
+    preferred file never lands on disk (failed download, bad mirror, etc.).
     """
     key_order: list[str] = []
     groups: dict[str, list[tuple[str, str, int | None, bool]]] = {}
@@ -122,38 +153,100 @@ def filter_by_quality_preference(
         groups[key].append((url, fn, size_b, _is_hd_filename(fn)))
 
     result: list[ScrapeRow] = []
+    ranked_by_key: dict[str, list[ScrapeRow]] = {}
     dropped = 0
     for key in key_order:
         g = groups[key]
         if prefer == "hd":
-            chosen = max(
-                g,
-                key=lambda r: (
-                    r[2] if r[2] is not None else -1,
-                    1 if r[3] else 0,
-                ),
-            )
+            g_sorted = sorted(g, key=_quality_rows_hd_sort_key, reverse=True)
         else:
-            chosen = min(
-                g,
-                key=lambda r: (
-                    r[2] if r[2] is not None else float("inf"),
-                    1 if r[3] else 0,
-                ),
-            )
+            g_sorted = sorted(g, key=_quality_rows_sd_sort_key)
+        ranked_by_key[key] = [(t[0], t[1], t[2]) for t in g_sorted]
+        chosen = g_sorted[0]
         result.append((chosen[0], chosen[1], chosen[2]))
         dropped += len(g) - 1
 
     if dropped:
         print(
-            f"🎯 Quality preference {prefer!r} (size-primary, _HD_ tiebreak): dropped {dropped} "
+            f"🎯 Quality preference {prefer!r} (version _vN_, then size, then _HD_ tiebreak): "
+            f"dropped {dropped} "
             f"duplicate episode row(s) ({len(download_items)} → {len(result)} files)"
         )
     else:
         print(
             f"🎯 Quality preference {prefer!r}: no duplicate keys in scrape ({len(result)} files)"
         )
-    return result
+    return result, ranked_by_key
+
+
+def discover_canonical_keys_on_disk(target_dir: Path, ext: str) -> set[str]:
+    """Set of logical episode/movie keys covered by finished media files in target."""
+    keys: set[str] = set()
+    for fp in target_dir.glob(f"*.{ext}"):
+        keys.add(_canonical_episode_key(fp.name))
+    return keys
+
+
+def _existing_media_basenames(target_dir: Path, ext: str) -> set[str]:
+    return {p.name.lower() for p in target_dir.glob(f"*.{ext}")}
+
+
+def _filename_blocked_by_existing(filename: str, existing_lower: set[str]) -> bool:
+    base_name = filename.lower()
+    if base_name in existing_lower:
+        return True
+    stem = filename.rsplit(".", 1)[0].lower()
+    return any(f.startswith(stem) for f in existing_lower)
+
+
+def filter_scrape_rows_not_on_disk(
+    items: list[ScrapeRow], target_dir: Path, ext: str, *, log_skips: bool = True
+) -> list[ScrapeRow]:
+    """Drop rows whose output basename (or Chrome conflict prefix) already exists on disk."""
+    existing = _existing_media_basenames(target_dir, ext)
+    out: list[ScrapeRow] = []
+    for url, filename, expected_bytes in items:
+        base_name = filename.lower()
+        if base_name in existing:
+            if log_skips:
+                print(f"⏭️  Skipping {filename} - already exists")
+            continue
+        stem = filename.rsplit(".", 1)[0].lower()
+        conflicts = [f for f in existing if f.startswith(stem)]
+        if conflicts:
+            if log_skips:
+                print(f"⏭️  Skipping {filename} - similar file exists: {conflicts[0]}")
+            continue
+        out.append((url, filename, expected_bytes))
+    return out
+
+
+def build_gap_fill_rows(
+    ranked_by_key: dict[str, list[ScrapeRow]],
+    target_dir: Path,
+    ext: str,
+) -> list[ScrapeRow]:
+    """
+    After the primary queue, find canonical keys that still have no file on disk and queue
+    the next-best release for each (skips index 0 — already attempted in the main pass).
+    """
+    on_disk = discover_canonical_keys_on_disk(target_dir, ext)
+    fillable = {k for k in ranked_by_key if not k.startswith("unique:")}
+    missing = fillable - on_disk
+    if not missing:
+        return []
+
+    existing_lower = _existing_media_basenames(target_dir, ext)
+    out: list[ScrapeRow] = []
+    for key in sorted(missing):
+        alts = ranked_by_key.get(key, [])
+        for candidate in alts[1:]:
+            _url, filename, _exp = candidate
+            if not _filename_blocked_by_existing(filename, existing_lower):
+                out.append(candidate)
+                existing_lower.add(filename.lower())
+                break
+    return out
 
 
 class KrdlSeleniumDownloader:
@@ -1031,10 +1124,9 @@ def main():
         choices=["hd", "sd"],
         default="hd",
         help=(
-            "Per episode (canonical numbering), pick one table row: hd = largest file size from "
-            "KRDL, tie-breaking with _HD_ in the filename (fills gaps with whatever size exists); "
-            "sd = smallest size, tie-breaking toward non-HD names, falling back when only large/HD "
-            "files exist."
+            "Per episode (canonical numbering), pick one table row: prefer highest _vN_ (e.g. v2 over "
+            "base), then for hd = larger KRDL size (tie: _HD_ in name); sd = smaller size (tie: "
+            "avoid _HD_)."
         ),
     )
     ap.add_argument("--headless", action="store_true", help="Run browser in headless mode")
@@ -1050,6 +1142,16 @@ def main():
             "Seconds to pause before starting each new download after waiting for a slot to free "
             "(default: 15). Use 0 to disable. Helps avoid krdl premium/rate redirects when chaining "
             "many files."
+        ),
+    )
+    ap.add_argument(
+        "--gap-fill-second-pass",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After the main queue, find episode/movie keys still missing on disk and queue the "
+            "next-best alternate release per key (different encode/group). Disable with "
+            "--no-gap-fill-second-pass."
         ),
     )
     args = ap.parse_args()
@@ -1093,8 +1195,8 @@ def main():
             return
 
         # Scrape download links
-        download_urls = downloader.scrape_download_links(args.url, args.ext)
-        download_urls = filter_by_quality_preference(download_urls, args.quality)
+        raw_urls = downloader.scrape_download_links(args.url, args.ext)
+        download_urls, ranked_by_key = filter_by_quality_preference(raw_urls, args.quality)
 
         if not download_urls:
             print("❌ No download links found on the page")
@@ -1102,52 +1204,31 @@ def main():
 
         # CRITICAL: Check for duplicates BEFORE any downloads start
         print("🔍 Checking for existing files to avoid duplicates...")
-        existing_files = set()
+        print(
+            f"🔍 Found {len(_existing_media_basenames(target_dir, args.ext))} existing "
+            f"{args.ext!r} files in target directory"
+        )
 
-        # Only treat finished rips as duplicates. Do NOT skip because of *.crdownload: after a
-        # failed or interrupted run Chrome often deletes the partial, but if a stale .crdownload
-        # remains, treating it as "already have this episode" skips the job forever with no .mkv.
-        for file_path in target_dir.glob(f"*.{args.ext}"):
-            existing_files.add(file_path.name.lower())
-
-        print(f"🔍 Found {len(existing_files)} existing {args.ext!r} files in target directory")
-
-        # Filter out URLs that would create duplicates BEFORE starting downloads
-        # download_urls is (url, filename, expected_bytes | None)
-        filtered_items = []
-        for url, filename, expected_bytes in download_urls:
-            # Filename already has extension from table
-            base_name = filename.lower()
-
-            # Check for exact match
-            if base_name in existing_files:
-                print(f"⏭️  Skipping {filename} - already exists")
-                continue
-
-            # Check for potential conflicts (Chrome auto-renaming)
-            # Remove extension for prefix matching
-            filename_without_ext = filename.rsplit(".", 1)[0].lower()
-            potential_conflicts = [f for f in existing_files if f.startswith(filename_without_ext)]
-            if potential_conflicts:
-                print(f"⏭️  Skipping {filename} - similar file exists: {potential_conflicts[0]}")
-                continue
-
-            filtered_items.append((url, filename, expected_bytes))
-
+        filtered_items = filter_scrape_rows_not_on_disk(download_urls, target_dir, args.ext)
         print(f"📊 After duplicate check: {len(filtered_items)} downloads to start")
+
+        def rows_to_jobs(rows: list[ScrapeRow]) -> list[Job]:
+            jobs_out: list[Job] = []
+            for url, filename, expected_bytes in rows:
+                jobs_out.append(
+                    Job(
+                        url=url,
+                        name=filename,
+                        out_path=target_dir / filename,
+                        status="QUEUED",
+                        expected_bytes=expected_bytes,
+                    )
+                )
+            return jobs_out
 
         # Prepare jobs with filtered URLs and filenames
         print(f"📁 Preparing jobs for {args.ext} files...")
-        jobs = []
-        for url, filename, expected_bytes in filtered_items:
-            job = Job(
-                url=url,
-                name=filename,
-                out_path=target_dir / filename,
-                status="QUEUED",
-                expected_bytes=expected_bytes,
-            )
-            jobs.append(job)
+        jobs = rows_to_jobs(filtered_items)
 
         # Apply limit to the number of downloads (not the filtered list)
         if args.limit and args.limit > 0 and len(jobs) > args.limit:
@@ -1161,24 +1242,58 @@ def main():
 
         if not queued_jobs:
             print("✅ No new downloads needed.")
-            return
+        else:
+            # Download files with PROPER QUEUE - max 2 concurrent
+            completed_jobs = downloader.download_queue(
+                queued_jobs,
+                max_concurrent=2,
+                stagger_seconds=args.stagger_seconds,
+            )
 
-        # Download files with PROPER QUEUE - max 2 concurrent
-        completed_jobs = downloader.download_queue(
-            queued_jobs,
-            max_concurrent=2,
-            stagger_seconds=args.stagger_seconds,
-        )
+            successful = [j for j in completed_jobs if j.status == "DONE"]
+            failed = [j for j in completed_jobs if j.status == "FAIL"]
+            skipped = [j for j in completed_jobs if j.status == "SKIP"]
 
-        # Summary
-        successful = [j for j in completed_jobs if j.status == "DONE"]
-        failed = [j for j in completed_jobs if j.status == "FAIL"]
-        skipped = [j for j in completed_jobs if j.status == "SKIP"]
+            print("\n📊 Download Summary:")
+            print(f"  ✅ Successful: {len(successful)}")
+            print(f"  ❌ Failed: {len(failed)}")
+            print(f"  ⏭️  Skipped: {len(skipped)}")
 
-        print("\n📊 Download Summary:")
-        print(f"  ✅ Successful: {len(successful)}")
-        print(f"  ❌ Failed: {len(failed)}")
-        print(f"  ⏭️  Skipped: {len(skipped)}")
+        if args.gap_fill_second_pass:
+            gap_candidates = build_gap_fill_rows(ranked_by_key, target_dir, args.ext)
+            gap_filtered = filter_scrape_rows_not_on_disk(
+                gap_candidates, target_dir, args.ext, log_skips=True
+            )
+            if gap_filtered:
+                print(
+                    f"\n🔁 Gap-fill pass: queueing {len(gap_filtered)} alternate release(s) "
+                    "for canonical episode/movie keys still missing on disk."
+                )
+                gap_jobs = rows_to_jobs(gap_filtered)
+                if args.limit and args.limit > 0 and len(gap_jobs) > args.limit:
+                    gap_jobs = gap_jobs[: args.limit]
+                    print(f"⚠️  LIMIT APPLIED to gap-fill: first {args.limit} job(s) only")
+                gap_completed = downloader.download_queue(
+                    gap_jobs,
+                    max_concurrent=2,
+                    stagger_seconds=args.stagger_seconds,
+                )
+                gs = [j for j in gap_completed if j.status == "DONE"]
+                gf = [j for j in gap_completed if j.status == "FAIL"]
+                gsk = [j for j in gap_completed if j.status == "SKIP"]
+                print("\n📊 Gap-fill Summary:")
+                print(f"  ✅ Successful: {len(gs)}")
+                print(f"  ❌ Failed: {len(gf)}")
+                print(f"  ⏭️  Skipped: {len(gsk)}")
+            else:
+                rem = {
+                    k for k in ranked_by_key if not k.startswith("unique:")
+                } - discover_canonical_keys_on_disk(target_dir, args.ext)
+                if rem:
+                    print(
+                        "\n⚠️  Gap-fill: some keys still have no file on disk but no alternates "
+                        f"remain in the scrape (example keys: {', '.join(sorted(rem)[:5])})."
+                    )
 
     finally:
         downloader.close()
