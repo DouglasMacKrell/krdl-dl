@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-03-27
+
+### Added
+
+- **Multi-format show scrape** (default): loads **`.mkv`**, **`.mp4`**, and **`.avi`** tabs (3 page loads), merges rows, then **`pick_episodes_from_unified_scrape`** — one queue row per canonical key with container preference **`MKV → MP4 → AVI`** (from `--ext` order) plus `--quality` / `_vN_` / `_HD_` tie-breaks.
+- **`--strict-ext`**: single-tab scrape for `--ext` only; no cross-format merge or fallback.
+- **`--ext avi`**: `avi` is a first-class choice alongside `mkv` and `mp4`.
+- **`--gap-fill-second-pass` / `--no-gap-fill-second-pass`** (default on): after the main queue, queue the next-best alternate per **missing** canonical key (when alternates exist in the scrape).
+- **`--tiny-preview-cooldown-seconds`** (default 600): long pause after ep **00** or a very small finished file frees a slot (rate-limit friendly).
+- **Cross-format disk dedupe**: **`filter_scrape_rows_not_on_disk`** skips a row when its **canonical episode key** already exists under **`--target`** as any of `.mkv`/`.mp4`/`.avi` — avoids re-downloading T-N AVI when GS MKV is already present (also used when `--strict-ext` so MKV on disk still blocks redundant AVI).
+- **Transient download recovery**: **`Job.krdl_retries_left`** and **`--max-download-retries`** (default 3) re-queue the same job after vanished partials or failed begin handoffs; work queue uses a **`deque`** so retries respect the 2-slot limit.
+- **Stall tuning**: **`--vanished-partial-grace-seconds`** (default 300, “no bytes yet”), **`--vanished-after-progress-grace-seconds`** (default 75, after partial was growing then Chrome removed `.crdownload` files), **`--idle-no-claim-grace-seconds`** (default 300).
+- **`_had_byte_progress`**, **`movie:hong_kong`** vs theatrical **`movie`**, T-N-style **`_-_NN[…]`** / **`_-_Movie[`** / VS Boukenger **special** keys for cleaner grouping.
+- **Download summary**: failures whose canonical keys are still missing on disk are called out with tuning hints.
+- Tests: unified scrape picks, **`filter_scrape_rows_not_on_disk`** canonical skip, vanished-partial abandon behavior.
+
+### Fixed
+
+- **Completed job accounting**: successful downloads set **`DONE`** and append to the completed list (summary counts were misleading before).
+- **Rate-limit stop**: pending jobs in the work queue are marked **`FAIL`** and recorded instead of being dropped silently.
+- **Deadlock**: shortened abandon window **after byte progress** when all claimed partials vanish (previously could wait the full 300s with both slots “busy” and no data moving).
+
+### Changed
+
+- **`build_gap_fill_rows`** and canonical-key checks scan **all** container extensions on disk for “already have this episode,” not only the active scrape extensions.
+
 ## [1.1.0] - 2026-03-28
 
 ### Added
@@ -38,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pre-commit** (Ruff + hygiene hooks) and **GitHub Actions** CI (pre-commit + pytest on Python 3.9, 3.11, 3.12).
 - **`requirements-dev.txt`** for local development tooling.
 
-[Unreleased]: https://github.com/DouglasMacKrell/krdl-dl/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/DouglasMacKrell/krdl-dl/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/DouglasMacKrell/krdl-dl/releases/tag/v1.2.0
 [1.1.0]: https://github.com/DouglasMacKrell/krdl-dl/releases/tag/v1.1.0
 [1.0.0]: https://github.com/DouglasMacKrell/krdl-dl/releases/tag/v1.0.0

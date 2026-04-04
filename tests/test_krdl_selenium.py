@@ -10,11 +10,17 @@ from csvdl_core import Job
 from krdl_selenium import (
     KrdlSeleniumDownloader,
     _canonical_episode_key,
+    _container_ext_try_order,
+    _container_from_download_href,
     _is_hd_filename,
+    _krdl_show_base_url,
+    _krdl_show_url_for_file_extension,
     _parse_krdl_size_bytes,
     build_gap_fill_rows,
     discover_canonical_keys_on_disk,
     filter_by_quality_preference,
+    filter_scrape_rows_not_on_disk,
+    pick_episodes_from_unified_scrape,
 )
 
 _MIB = 1024**2
@@ -135,6 +141,27 @@ class TestIsDownloadFinished:
         assert dl._is_download_finished(info) is True
 
 
+class TestTinyPreviewComplete:
+    def test_ep000_always_tiny(self, dl: KrdlSeleniumDownloader):
+        fn = "[X]_Show_00_[abcd1234].mkv"
+        assert _canonical_episode_key(fn) == "ep:000"
+        assert dl._is_tiny_preview_complete(fn) is True
+
+    def test_small_file_on_disk(self, dl: KrdlSeleniumDownloader, tmp_path: Path):
+        fn = "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv"
+        assert _canonical_episode_key(fn) == "ep:001"
+        (tmp_path / fn).write_bytes(b"x" * 4096)
+        assert dl._is_tiny_preview_complete(fn) is True
+
+    def test_large_file_not_tiny(self, dl: KrdlSeleniumDownloader, tmp_path: Path):
+        fn = "[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv"
+        (tmp_path / fn).write_bytes(b"z" * (70 * _MIB))
+        assert dl._is_tiny_preview_complete(fn) is False
+
+    def test_missing_file_not_tiny_unless_ep000(self, dl: KrdlSeleniumDownloader):
+        assert dl._is_tiny_preview_complete("[BernSubs]Battle_Fever_J_01_[922C3BDB].mkv") is False
+
+
 class TestAbandonStalled:
     def test_abandon_after_long_time_no_file_no_named_partial(
         self, dl: KrdlSeleniumDownloader, tmp_path: Path
@@ -159,10 +186,54 @@ class TestAbandonStalled:
             "start_time": time.time() - 30,
             "url": "u",
             "claimed_crdownloads": {"Unconfirmed 12345.crdownload"},
-            "claim_vanished_since": time.time() - 95,
+            "claim_vanished_since": time.time() - 305,
         }
         assert dl._should_abandon_stalled_download(info) is True
         assert job.status == "FAIL"
+
+    def test_abandon_when_claimed_vanished_much_sooner_after_byte_progress(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        job = Job(url="u", name="x.mkv", status="QUEUED")
+        info = {
+            "job": job,
+            "filename": "x.mkv",
+            "start_time": time.time() - 120,
+            "url": "u",
+            "claimed_crdownloads": {"x.mkv.crdownload"},
+            "claim_vanished_since": time.time() - 80,
+            "last_size": 50_000_000,
+        }
+        assert (
+            dl._should_abandon_stalled_download(
+                info,
+                vanished_partial_grace_sec=300.0,
+                vanished_after_progress_grace_sec=75.0,
+            )
+            is True
+        )
+        assert job.status == "FAIL"
+
+    def test_no_abandon_vanished_before_progress_grace_without_bytes(
+        self, dl: KrdlSeleniumDownloader, tmp_path: Path
+    ):
+        job = Job(url="u", name="x.mkv", status="QUEUED")
+        info = {
+            "job": job,
+            "filename": "x.mkv",
+            "start_time": time.time() - 120,
+            "url": "u",
+            "claimed_crdownloads": {"x.mkv.crdownload"},
+            "claim_vanished_since": time.time() - 80,
+        }
+        assert (
+            dl._should_abandon_stalled_download(
+                info,
+                vanished_partial_grace_sec=300.0,
+                vanished_after_progress_grace_sec=75.0,
+            )
+            is False
+        )
 
     def test_abandon_frozen_named_partial(self, dl: KrdlSeleniumDownloader, tmp_path: Path):
         job = Job(url="u", name="stuck.mkv", status="QUEUED")
@@ -178,6 +249,98 @@ class TestAbandonStalled:
         }
         assert dl._should_abandon_stalled_download(info) is True
         assert job.status == "FAIL"
+
+
+class TestPickEpisodesUnifiedScrape:
+    def test_combined_table_prefers_mkv_then_mp4_for_missing_episode(self):
+        """Same table: E01–E02 mkv + mp4 dupes; E03 only mp4 → E03 is mp4, E01–E02 mkv."""
+        mkv_ep1 = "[G]_Show_01_[aaaaaaaa].mkv"
+        mkv_ep2 = "[G]_Show_02_[bbbbbbbb].mkv"
+        mp4_ep3 = "[G]_Show_03_[cccccccc].mp4"
+        unified = [
+            ("https://krdl.moe/download/x1/mkv", mkv_ep1, 100 * _MIB),
+            ("https://krdl.moe/download/x2/mkv", mkv_ep2, 100 * _MIB),
+            ("https://krdl.moe/download/p1/mp4", mkv_ep1.replace(".mkv", ".mp4"), 500 * _MIB),
+            ("https://krdl.moe/download/p2/mp4", mkv_ep2.replace(".mkv", ".mp4"), 500 * _MIB),
+            ("https://krdl.moe/download/p3/mp4", mp4_ep3, 200 * _MIB),
+        ]
+        merged, _ranked, chosen = pick_episodes_from_unified_scrape(
+            unified,
+            "hd",
+            ("mkv", "mp4", "avi"),
+            strict_container=False,
+        )
+        assert len(merged) == 3
+        names = {t[1] for t in merged}
+        assert mkv_ep1 in names and mkv_ep2 in names
+        assert mp4_ep3 in names
+        assert chosen[_canonical_episode_key(mkv_ep1)] == "mkv"
+        assert chosen[_canonical_episode_key(mkv_ep2)] == "mkv"
+        assert chosen[_canonical_episode_key(mp4_ep3)] == "mp4"
+
+    def test_strict_drops_other_containers(self):
+        fn = "[G]_Show_01_[aaaaaaaa].mkv"
+        unified = [
+            ("https://krdl.moe/download/a/mkv", fn, 100 * _MIB),
+            ("https://krdl.moe/download/b/mp4", fn.replace(".mkv", ".mp4"), 900 * _MIB),
+        ]
+        merged, ranked, chosen = pick_episodes_from_unified_scrape(
+            unified,
+            "hd",
+            ("mkv", "mp4", "avi"),
+            strict_container=True,
+        )
+        assert len(merged) == 1
+        assert chosen[_canonical_episode_key(fn)] == "mkv"
+        assert len(ranked[_canonical_episode_key(fn)]) == 1
+
+
+class TestContainerFromDownloadHref:
+    def test_parses_suffix(self):
+        assert _container_from_download_href("https://krdl.moe/download/foo/mkv") == "mkv"
+        assert _container_from_download_href("https://krdl.moe/download/foo/mkv?x=1") == "mkv"
+        assert _container_from_download_href("https://krdl.moe/download/foo/MP4#frag") == "mp4"
+        assert _container_from_download_href("https://example.com/nope") is None
+
+
+class TestContainerExtTryOrder:
+    def test_mkv_preference_chain(self):
+        assert _container_ext_try_order("mkv", strict=False) == ("mkv", "mp4", "avi")
+
+    def test_mp4_preference_chain(self):
+        assert _container_ext_try_order("mp4", strict=False) == ("mp4", "mkv", "avi")
+
+    def test_avi_preference_chain(self):
+        assert _container_ext_try_order("avi", strict=False) == ("avi", "mkv", "mp4")
+
+    def test_strict_single(self):
+        assert _container_ext_try_order("mp4", strict=True) == ("mp4",)
+
+
+class TestKrdlShowUrlForExtension:
+    def test_base_show_appends_format(self):
+        assert (
+            _krdl_show_url_for_file_extension("https://krdl.moe/show/chikyu-sentai-fiveman", "mkv")
+            == "https://krdl.moe/show/chikyu-sentai-fiveman/mkv"
+        )
+
+    def test_already_suffix_unchanged(self):
+        u = "https://krdl.moe/show/chikyu-sentai-fiveman/mkv"
+        assert _krdl_show_url_for_file_extension(u, "mkv") == u
+
+    def test_replace_previous_format_segment(self):
+        assert (
+            _krdl_show_url_for_file_extension(
+                "https://krdl.moe/show/chikyu-sentai-fiveman/mp4", "mkv"
+            )
+            == "https://krdl.moe/show/chikyu-sentai-fiveman/mkv"
+        )
+
+    def test_base_url_strips_format(self):
+        assert (
+            _krdl_show_base_url("https://krdl.moe/show/chikyu-sentai-fiveman/mkv")
+            == "https://krdl.moe/show/chikyu-sentai-fiveman"
+        )
 
 
 class TestCanonicalEpisodeKey:
@@ -210,6 +373,36 @@ class TestCanonicalEpisodeKey:
         a = "[SomeGroup]_Weird_Release.mkv"
         b = "[SomeGroup]_Other_Stuff.mkv"
         assert _canonical_episode_key(a) != _canonical_episode_key(b)
+
+    def test_tn_gekiranger_dash_ep_bracket_matches_gs_earthly_numbered(self):
+        tn = "[T-N]Jyuken_Sentai_Gekiranger_-_01[FFF99938].avi"
+        tn_dvd = "[T-N]Jyuken_Sentai_GekiRanger_-_01DVD[C63B6B81]7thAnniversary.avi"
+        gs = "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_01_[1FC3BFC0].mkv"
+        assert (
+            _canonical_episode_key(tn)
+            == _canonical_episode_key(tn_dvd)
+            == _canonical_episode_key(gs)
+            == "ep:001"
+        )
+
+    def test_tn_gekiranger_hd_mp4_anniversary_same_ep_key(self):
+        mp4 = "[T-N]Jyuken_Sentai_Gekiranger_01_HD[E8C4AFAE]7thAnniversary.mp4"
+        gs = "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_01_[1FC3BFC0].mkv"
+        assert _canonical_episode_key(mp4) == _canonical_episode_key(gs) == "ep:001"
+
+    def test_tn_gekiranger_movie_bracket_is_movie_key_distinct_from_hong_kong(self):
+        tn = "[T-N]Jyuken_Sentai_GekiRanger_-_Movie[68D57B09].avi"
+        gs_hk = (
+            "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_-_The_Movie_-_Teamy_Worky!_"
+            "Grand_Hong_Kong_Battle!_[5C0ACE3B].mkv"
+        )
+        assert _canonical_episode_key(tn) == "movie"
+        assert _canonical_episode_key(gs_hk) == "movie:hong_kong"
+
+    def test_gekiranger_vs_boukenger_cross_release_key(self):
+        tn = "[T-N]JyuKen_Sentai_GekiRanger_Vs_GoGo_Sentai_Boukenger[AEEFCD79]DVD.avi"
+        gs = "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_VS_Boukenger_[5F1E2710].mkv"
+        assert _canonical_episode_key(tn) == _canonical_episode_key(gs) == "special:gekiranger_vs_boukenger"
 
 
 class TestIsHdFilename:
@@ -345,7 +538,40 @@ class TestFilterByQualityPreference:
         # Simulate episode 01 on disk only; ep002 missing
         f01 = tmp_path / "[TKP]_Dengeki_Sentai_Changeman_-_01_v2_[c251747e].mkv"
         f01.write_bytes(b"x")
-        gap = build_gap_fill_rows(ranked, tmp_path, "mkv")
+        gap = build_gap_fill_rows(ranked, tmp_path, ("mkv",))
         assert len(gap) == 1
         assert gap[0][1] == guis[1]
         assert discover_canonical_keys_on_disk(tmp_path, "mkv") == {"ep:001"}
+
+
+class TestFilterScrapeRowsCanonicalDedupe:
+    def test_skips_avi_when_mkv_same_episode_key_on_disk(self, tmp_path: Path):
+        mk = (
+            "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_08_[aaaaaaaa].mkv",
+        )
+        av = "[T-N]Jyuken_Sentai_Gekiranger_-_08[FFFFFFFF].avi"
+        (tmp_path / mk[0]).write_bytes(b"x")
+        rows = [
+            ("https://krdl.moe/download/x/avi", av, 100),
+            ("https://krdl.moe/download/y/mkv", mk[0], 200),
+        ]
+        out = filter_scrape_rows_not_on_disk(
+            rows,
+            tmp_path,
+            ("mkv", "mp4", "avi"),
+            log_skips=False,
+            skip_if_canonical_key_on_disk=True,
+        )
+        assert out == []
+
+    def test_unique_keys_not_skipped_by_other_unique(self, tmp_path: Path):
+        (tmp_path / "promo_a.avi").write_bytes(b"x")
+        rows = [("https://krdl.moe/download/p/b.avi", "promo_b.avi", 10)]
+        out = filter_scrape_rows_not_on_disk(
+            rows,
+            tmp_path,
+            ("avi",),
+            log_skips=False,
+            skip_if_canonical_key_on_disk=True,
+        )
+        assert len(out) == 1

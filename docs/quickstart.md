@@ -41,11 +41,14 @@ python3 krdl_selenium.py \
   --quality hd
 ```
 
-- **`--ext`**: only `mkv` or `mp4` links from the table are collected.
-- **`--quality hd`** (default): for each **episode number** (or movie key) found in filenames, the script keeps the row with the **largest** size reported in the table; if sizes tie, it prefers filenames containing `_HD_`. If only one rip exists for that episode, it is used.
-- **`--quality sd`**: prefers **smaller** sizes (and ties toward names **without** `_HD_`), still falling back when only one row exists.
+**What this does (defaults):**
 
-## MP4 only
+- Loads **`mkv`**, **`mp4`**, and **`avi`** tabs (three page loads), merges the tables, then picks **one row per episode** (canonical key). **`--ext mkv`** means **prefer MKV** when multiple containers exist for the same episode; fall back to mp4/avi as needed.
+- **`--quality hd`** (default): among same-key candidates, prefers **larger** reported sizes, higher **`_vN_`**, and **`_HD_`** tie-breaks; **`sd`** prefers smaller / avoids `HD` ties.
+
+## MP4 or AVI preference
+
+`--ext` can be **`mkv`**, **`mp4`**, or **`avi`** — it sets **preference order** when the multi-tab merge is enabled (default).
 
 ```bash
 python3 krdl_selenium.py \
@@ -54,6 +57,21 @@ python3 krdl_selenium.py \
   --ext mp4 \
   --quality hd
 ```
+
+## Single tab only (`--strict-ext`)
+
+One format tab, one page load; no mkv/mp4/avi merge (legacy-style behavior).
+
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/…" \
+  --target "/path/to/folder" \
+  --ext mkv \
+  --strict-ext \
+  --quality hd
+```
+
+Disk dedupe still considers **all** of `.mkv`/`.mp4`/`.avi` in `--target` for **canonical episode keys**, so you do not re-download an AVI when the MKV for that episode is already there.
 
 ## Safer pacing
 
@@ -67,6 +85,19 @@ python3 krdl_selenium.py \
   --stagger-seconds 60
 ```
 
+## Flaky network / vanished downloads
+
+Chrome may drop `.crdownload` files when the link flaps. The tool **re-queues** jobs up to **`--max-download-retries`** (default **3**). Tune stall windows if needed:
+
+```bash
+python3 krdl_selenium.py \
+  --url "https://krdl.moe/show/…" \
+  --target "/path/to/folder" \
+  --ext mkv \
+  --max-download-retries 5 \
+  --vanished-after-progress-grace-seconds 60
+```
+
 ## Smoke test with `--limit`
 
 ```bash
@@ -77,7 +108,15 @@ python3 krdl_selenium.py \
   --limit 2
 ```
 
-`--limit` applies **after** skipping files that already exist in `--target`.
+`--limit` applies **after** skipping files / canonical keys already satisfied in `--target`.
+
+## Gap-fill pass
+
+By default, after the main queue the script may download **alternate releases** for episode keys still missing on disk. Disable with:
+
+```bash
+python3 krdl_selenium.py --url "…" --target "…" --ext mkv --no-gap-fill-second-pass
+```
 
 ## Common CLI flags
 
@@ -85,9 +124,14 @@ python3 krdl_selenium.py \
 |------|---------|
 | `--url` | Show page URL (required) |
 | `--target` | Output directory (required) |
-| `--ext` | `mkv` or `mp4` |
+| `--ext` | `mkv`, `mp4`, or `avi` (preference in merged mode) |
+| `--strict-ext` | Single tab for `--ext` only |
 | `--quality` | `hd` or `sd` |
 | `--stagger-seconds` | Pause before each new start after a slot opens (default `15`) |
+| `--tiny-preview-cooldown-seconds` | Extra pause after ep 00 / tiny file frees a slot (default `600`) |
+| `--max-download-retries` | Re-queue after transient failures (default `3`) |
+| `--vanished-*` / `--idle-no-claim-grace-seconds` | Stall / abandon tuning (see `--help`) |
+| `--gap-fill-second-pass` / `--no-gap-fill-second-pass` | Second pass for missing keys (default on) |
 | `--limit` | Max new downloads this run |
 | `--headless` | Headless Chrome |
 | `--username` / `--password` | Override `.env` |
@@ -96,9 +140,9 @@ Full list: `python3 krdl_selenium.py --help` or the root [README](../README.md).
 
 ## What to expect
 
-1. A Chrome window opens (unless `--headless`), logs in, opens the show page.
-2. Pagination is set to **All** so every table row is visible.
-3. The script builds a queue, skips names that already exist as finished `*.{ext}`, then downloads with **at most two** active transfers.
+1. A Chrome window opens (unless `--headless`), logs in, opens the show page(s).
+2. Pagination is set to **All** on each format tab that is scraped.
+3. The script builds a queue, skips names and **canonical keys** already satisfied on disk, then downloads with **at most two** active transfers.
 4. Interrupted runs: **stale `.crdownload` files are not treated as completed episodes**—re-run to retry. A matching partial is removed when a job starts if the final file is still missing.
 
 ## Troubleshooting
@@ -108,7 +152,9 @@ Full list: `python3 krdl_selenium.py --help` or the root [README](../README.md).
 | “No credentials” | `.env` in project root, or pass `--username` / `--password` |
 | Premium/register redirect | Cool off (often 15+ minutes); increase `--stagger-seconds`; do not run two downloads on the same account in parallel |
 | Browser / login | Run without `--headless` and watch the window |
-| Wrong rip chosen | Use `--quality sd` or inspect table sizes on krdl; only the chosen `--ext` is compared |
+| Wrong rip chosen | Use `--quality sd` or inspect table sizes on krdl; unified mode compares across merged rows |
+| Slots stuck / no `.crdownload` | Network hiccup—lower `--vanished-after-progress-grace-seconds` or raise `--max-download-retries`; re-run |
+| Duplicate AVI + MKV from an old run | Safe to delete redundant files; new runs skip by **canonical key** |
 
 ## Next steps
 

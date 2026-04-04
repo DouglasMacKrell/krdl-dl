@@ -10,16 +10,18 @@ import argparse
 import os
 import re
 import time
+import traceback
 import unicodedata
+from collections import Counter, deque
 from pathlib import Path
 from typing import Literal, Optional, Tuple  # noqa: UP035
 
 from dotenv import load_dotenv
 from selenium import webdriver
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -27,6 +29,10 @@ from csvdl_core import Job, expand
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Finished files at or below this size count as "tiny preview" for a long between-slot cooldown
+# (together with canonical ep 00). Mirrors avoiding krdl kicking when a fast preview frees a slot.
+_TINY_PREVIEW_MAX_BYTES = 60 * 1024 * 1024
 
 
 def _normalize_download_basename(name: str) -> str:
@@ -93,22 +99,89 @@ def _canonical_episode_key(filename: str) -> str:
     Unknown shapes get a per-filename key (no cross-row dedupe).
     """
     n = _normalize_download_basename(filename)
+    if re.search(r"(?i)Grand_Hong_Kong|Teamy_Worky", n):
+        return "movie:hong_kong"
     if (
         re.search(r"(?i)(The_)?Movie.*_HD_", n)
         or re.search(r"(?i)_Movie_\s*\[", n)
         or re.search(r"(?i)_The_Movie_", n)
+        or re.search(r"(?i)_-_Movie\[", n)
     ):
         return "movie"
+    if re.search(r"(?i)Making_Of", n) and re.search(r"(?i)Boukenger", n):
+        return "special:gekiranger_vs_boukenger_making_of"
+    if re.search(r"(?i)GekiRanger.*Vs.*Boukenger", n) or re.search(
+        r"(?i)Gekiranger_VS_Boukenger", n
+    ):
+        return "special:gekiranger_vs_boukenger"
     m = re.search(r"(?i)_Ep0*(\d+)_", n)
     if m:
         return f"ep:{int(m.group(1)):03d}"
     m = re.search(r"(?i)_-_(\d{2,3})_", n)
     if m:
         return f"ep:{int(m.group(1)):03d}"
+    # T-N-style: "..._-_01[CRC].avi" / "..._-_01DVD[CRC].avi" (tag before "["); GS uses "..._01_[CRC].mkv"
+    m = re.search(r"(?i)_-_(\d{1,3})[A-Za-z0-9_]*\[", n)
+    if m:
+        return f"ep:{int(m.group(1)):03d}"
+    # "..._01_HD[CRC]7thAnniversary.mp4" and similar
+    m = re.search(r"(?i)_(\d{1,3})_HD\[", n)
+    if m:
+        return f"ep:{int(m.group(1)):03d}"
     m = re.search(r"(?i)_(\d{1,3})_(?:v\d+_)?\[[0-9a-fA-F]{6,12}\]", n)
     if m:
         return f"ep:{int(m.group(1)):03d}"
     return f"unique:{n}"
+
+
+_EXT_FALLBACK_ORDER: dict[str, tuple[str, ...]] = {
+    "mkv": ("mkv", "mp4", "avi"),
+    "mp4": ("mp4", "mkv", "avi"),
+    "avi": ("avi", "mkv", "mp4"),
+}
+
+ALL_CONTAINER_EXTENSIONS: tuple[str, ...] = ("mkv", "mp4", "avi")
+
+_MEDIA_HREF_CONTAINER = re.compile(r"/(mkv|mp4|avi)(?:\?|#|$)", re.I)
+
+
+def _container_ext_try_order(prefer: str, *, strict: bool) -> tuple[str, ...]:
+    p = prefer.lower().lstrip(".")
+    order = _EXT_FALLBACK_ORDER.get(p, ("mkv", "mp4", "avi"))
+    return (p,) if strict else order
+
+
+def _canonical_key_sort_key(k: str) -> tuple[int, str]:
+    """Sort movie after numbered episodes; unique:* last."""
+    if k == "movie" or k.startswith("movie:"):
+        return (1, k)
+    if k.startswith("ep:"):
+        try:
+            n = int(k.split(":", 1)[1])
+        except ValueError:
+            n = 99999
+        return (0, f"{n:05d}")
+    return (2, k)
+
+
+def _krdl_show_base_url(show_url: str) -> str:
+    """Strip /mkv|/mp4|/avi so we open the combined episode table (one page load)."""
+    base = show_url.strip().rstrip("/")
+    for seg in ("/mkv", "/mp4", "/avi"):
+        if base.lower().endswith(seg):
+            return base[: -len(seg)]
+    return base
+
+
+def _container_from_download_href(href: str) -> str | None:
+    m = _MEDIA_HREF_CONTAINER.search(href or "")
+    return m.group(1).lower() if m else None
+
+
+def _krdl_show_url_for_file_extension(show_url: str, extension: str) -> str:
+    """Legacy: format-specific tab URL (tests / one-off use)."""
+    ext = extension.lower().lstrip(".")
+    return f"{_krdl_show_base_url(show_url)}/{ext}"
 
 
 # Module-level alias: typing.Tuple required for Python 3.9 (tuple[…] and X|Y evaluated at import time).
@@ -143,6 +216,8 @@ def filter_by_quality_preference(
     sorted best-first (same order as the winner). Used to queue alternate releases when the
     preferred file never lands on disk (failed download, bad mirror, etc.).
     """
+    if not download_items:
+        return [], {}
     key_order: list[str] = []
     groups: dict[str, list[tuple[str, str, int | None, bool]]] = {}
     for url, fn, size_b in download_items:
@@ -179,6 +254,82 @@ def filter_by_quality_preference(
     return result, ranked_by_key
 
 
+def _unified_group_sort_key(
+    item: tuple[ScrapeRow, str],
+    quality: Literal["hd", "sd"],
+    container_order: tuple[str, ...],
+) -> tuple:
+    (_url, fn, sz), cont = item
+    tier = container_order.index(cont) if cont in container_order else 99
+    is_h = _is_hd_filename(fn)
+    if quality == "hd":
+        v = _release_version_counter(fn)
+        s = sz if sz is not None else -1
+        return (tier, -v, -s, -is_h)
+    v = _release_version_counter(fn)
+    s = sz if sz is not None else float("inf")
+    return (tier, -v, s, is_h)
+
+
+def pick_episodes_from_unified_scrape(
+    rows: list[ScrapeRow],
+    quality: Literal["hd", "sd"],
+    container_order: tuple[str, ...],
+    *,
+    strict_container: bool,
+) -> tuple[list[ScrapeRow], dict[str, list[ScrapeRow]], dict[str, str]]:
+    """
+    One queue row per canonical episode key: sort all table rows for that key by container
+    preference (mkv→mp4→avi, etc.), then version / size / HD per ``quality``.
+    ``ranked_by_key`` lists every row for gap-fill (best first).
+    """
+    enriched: list[tuple[ScrapeRow, str]] = []
+    for url, fn, sz in rows:
+        cont = _container_from_download_href(url)
+        if cont is None:
+            continue
+        if strict_container and cont != container_order[0]:
+            continue
+        enriched.append(((url, fn, sz), cont))
+
+    groups: dict[str, list[tuple[ScrapeRow, str]]] = {}
+    key_order: list[str] = []
+    for row, cont in enriched:
+        key = _canonical_episode_key(row[1])
+        if key not in groups:
+            key_order.append(key)
+            groups[key] = []
+        groups[key].append((row, cont))
+
+    ranked_by_key: dict[str, list[ScrapeRow]] = {}
+    picks: list[ScrapeRow] = []
+    chosen_fmt_by_key: dict[str, str] = {}
+    duplicates = 0
+
+    for key in key_order:
+        g = groups[key]
+        g_sorted = sorted(
+            g,
+            key=lambda it: _unified_group_sort_key(it, quality, container_order),
+        )
+        duplicates += len(g_sorted) - 1
+        flat = [t[0] for t in g_sorted]
+        ranked_by_key[key] = flat
+        best_row, best_cont = g_sorted[0]
+        picks.append(best_row)
+        chosen_fmt_by_key[key] = best_cont
+
+    if duplicates:
+        print(
+            f"🎯 Unified episode picks ({quality!r}, container priority {container_order}): "
+            f"{duplicates} extra table row(s) not queued (same-key alternates / other formats)."
+        )
+    else:
+        print(f"🎯 Unified episode picks ({quality!r}): one row per key from combined table.")
+
+    return picks, ranked_by_key, chosen_fmt_by_key
+
+
 def discover_canonical_keys_on_disk(target_dir: Path, ext: str) -> set[str]:
     """Set of logical episode/movie keys covered by finished media files in target."""
     keys: set[str] = set()
@@ -191,6 +342,24 @@ def _existing_media_basenames(target_dir: Path, ext: str) -> set[str]:
     return {p.name.lower() for p in target_dir.glob(f"*.{ext}")}
 
 
+def _existing_media_basenames_for_extensions(
+    target_dir: Path, extensions: tuple[str, ...]
+) -> set[str]:
+    names: set[str] = set()
+    for e in extensions:
+        names |= _existing_media_basenames(target_dir, e)
+    return names
+
+
+def discover_canonical_keys_on_disk_multi(
+    target_dir: Path, extensions: tuple[str, ...]
+) -> set[str]:
+    keys: set[str] = set()
+    for e in extensions:
+        keys |= discover_canonical_keys_on_disk(target_dir, e)
+    return keys
+
+
 def _filename_blocked_by_existing(filename: str, existing_lower: set[str]) -> bool:
     base_name = filename.lower()
     if base_name in existing_lower:
@@ -200,12 +369,36 @@ def _filename_blocked_by_existing(filename: str, existing_lower: set[str]) -> bo
 
 
 def filter_scrape_rows_not_on_disk(
-    items: list[ScrapeRow], target_dir: Path, ext: str, *, log_skips: bool = True
+    items: list[ScrapeRow],
+    target_dir: Path,
+    existing_extensions: tuple[str, ...],
+    *,
+    log_skips: bool = True,
+    skip_if_canonical_key_on_disk: bool = True,
 ) -> list[ScrapeRow]:
-    """Drop rows whose output basename (or Chrome conflict prefix) already exists on disk."""
-    existing = _existing_media_basenames(target_dir, ext)
+    """
+    Drop rows whose output basename (or Chrome conflict prefix) already exists on disk, and — when
+    ``skip_if_canonical_key_on_disk`` — any row whose logical episode/special key is already
+    satisfied by *any* file in ``existing_extensions`` (e.g. skip AVI ep 08 if ep:008 has an MKV).
+    """
+    existing = _existing_media_basenames_for_extensions(target_dir, existing_extensions)
+    # Same episode in .mkv must block a later .avi even when --strict-ext only scrapes one tab.
+    keys_on_disk = (
+        discover_canonical_keys_on_disk_multi(target_dir, ALL_CONTAINER_EXTENSIONS)
+        if skip_if_canonical_key_on_disk
+        else set()
+    )
     out: list[ScrapeRow] = []
     for url, filename, expected_bytes in items:
+        ck = _canonical_episode_key(filename)
+        if skip_if_canonical_key_on_disk and not ck.startswith("unique:"):
+            if ck in keys_on_disk:
+                if log_skips:
+                    print(
+                        f"⏭️  Skipping {filename} — canonical key {ck!r} already on disk "
+                        f"(any of {', '.join(ALL_CONTAINER_EXTENSIONS)})"
+                    )
+                continue
         base_name = filename.lower()
         if base_name in existing:
             if log_skips:
@@ -224,21 +417,20 @@ def filter_scrape_rows_not_on_disk(
 def build_gap_fill_rows(
     ranked_by_key: dict[str, list[ScrapeRow]],
     target_dir: Path,
-    ext: str,
+    existing_extensions: tuple[str, ...],
 ) -> list[ScrapeRow]:
-    """
-    After the primary queue, find canonical keys that still have no file on disk and queue
-    the next-best release for each (skips index 0 — already attempted in the main pass).
-    """
-    on_disk = discover_canonical_keys_on_disk(target_dir, ext)
+    """Next-best unified row per missing key (same list order as main pick, skip index 0)."""
+    on_disk = discover_canonical_keys_on_disk_multi(target_dir, ALL_CONTAINER_EXTENSIONS)
     fillable = {k for k in ranked_by_key if not k.startswith("unique:")}
     missing = fillable - on_disk
     if not missing:
         return []
 
-    existing_lower = _existing_media_basenames(target_dir, ext)
+    existing_lower = _existing_media_basenames_for_extensions(
+        target_dir, ALL_CONTAINER_EXTENSIONS
+    )
     out: list[ScrapeRow] = []
-    for key in sorted(missing):
+    for key in sorted(missing, key=_canonical_key_sort_key):
         alts = ranked_by_key.get(key, [])
         for candidate in alts[1:]:
             _url, filename, _exp = candidate
@@ -265,6 +457,7 @@ class KrdlSeleniumDownloader:
         # Browser options to mimic real user
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument("--disable-web-security")
         chrome_options.add_argument("--allow-running-insecure-content")
@@ -325,27 +518,17 @@ class KrdlSeleniumDownloader:
         self.clear_all_data()
 
     def clear_all_data(self):
-        """Clear all browser data to start fresh"""
+        """Clear cookies and site storage on krdl.moe (never touch storage on about:blank / data:)."""
         try:
             print("🧹 Clearing all browser data for fresh session...")
-            # Clear cookies
+            # Must be on a real https origin before localStorage/sessionStorage — Chrome on a
+            # blank or data: document throws and some driver builds tear down the session.
+            self.driver.get("https://krdl.moe/")
+            time.sleep(0.8)
             self.driver.delete_all_cookies()
-
-            # Clear local storage
-            self.driver.execute_script("window.localStorage.clear();")
-            self.driver.execute_script("window.sessionStorage.clear();")
-
-            # Clear IndexedDB
-            self.driver.execute_script("""
-                if (window.indexedDB) {
-                    indexedDB.databases().then(databases => {
-                        databases.forEach(db => {
-                            indexedDB.deleteDatabase(db.name);
-                        });
-                    });
-                }
-            """)
-
+            self.driver.execute_script(
+                "try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}"
+            )
             print("✅ Browser data cleared successfully")
         except Exception as e:
             print(f"⚠️  Warning: Could not clear all browser data: {e}")
@@ -475,25 +658,45 @@ class KrdlSeleniumDownloader:
             print(f"❌ Login failed: {e}")
             return False
 
-    def scrape_download_links(self, show_url: str, extension: str = "mkv") -> list[ScrapeRow]:
-        """Scrape download links from show page; each row is (url, filename, size_bytes | None)."""
+    def _scrape_show_tab(
+        self,
+        page_url: str,
+        *,
+        container_filter: str | None,
+    ) -> list[ScrapeRow]:
+        """
+        Load one show URL, expand the DataTable to ``All``, return rows.
+        If ``container_filter`` is set, keep only rows whose download URL ends with that
+        container (matches KRDL per-format tabs).
+        """
         try:
-            print(f"🌐 Scraping krdl.moe page: {show_url}")
+            print(f"🌐 Navigating to: {page_url!r}")
+            self.driver.get(page_url)
+            time.sleep(2)
 
-            # Navigate to show page
-            print(f"🔍 Navigating to show page: {show_url}")
-            self.driver.get(show_url)
+            def _table_or_empty_listing(driver) -> bool:
+                if driver.find_elements(By.TAG_NAME, "table"):
+                    return True
+                src = (driver.page_source or "").lower()
+                return "no files" in src or "nothing here" in src
 
-            # Wait for page to load
-            wait = WebDriverWait(self.driver, 10)
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
+            wait = WebDriverWait(self.driver, 25)
+            try:
+                wait.until(_table_or_empty_listing)
+            except TimeoutException:
+                print(
+                    "⚠️ Timed out waiting for an episode table (or empty-listing message). "
+                    f"URL: {self.driver.current_url!r} title: {self.driver.title!r}"
+                )
+                return []
 
-            # Log current state after navigation
-            current_url = self.driver.current_url
-            print(f"🔍 Current URL after show page navigation: {current_url}")
-            print(f"🔍 Page title: {self.driver.title}")
+            tables = self.driver.find_elements(By.TAG_NAME, "table")
+            if not tables:
+                print(f"⚠️ No <table> on this page. URL: {self.driver.current_url!r}")
+                return []
 
-            # Check for any error messages on the page
+            print(f"🔍 Current URL: {self.driver.current_url}")
+
             try:
                 error_elements = self.driver.find_elements(
                     By.CSS_SELECTOR, ".alert, .error, .warning, .message"
@@ -504,64 +707,119 @@ class KrdlSeleniumDownloader:
             except Exception:
                 pass
 
-            # CRITICAL: Click "All" in pagination to show all entries
             try:
-                # Look for the "Show X entries" dropdown
                 show_entries_select = self.driver.find_element(
                     By.CSS_SELECTOR, "select[name*='length'], select[name*='entries']"
                 )
                 print("🔍 Found pagination dropdown")
-
-                # Click on it to open options
                 show_entries_select.click()
                 time.sleep(0.5)
-
-                # Find and click "All" option
                 all_option = show_entries_select.find_element(By.XPATH, ".//option[text()='All']")
                 all_option.click()
                 print("✅ Selected 'All' entries - waiting for table to update...")
-                time.sleep(2)  # Wait for table to reload with all entries
+                time.sleep(2)
             except Exception as e:
                 print(f"⚠️  Could not find pagination dropdown (may already show all): {e}")
 
-            # Find all download links with their filenames from tables
-            download_links = []
+            download_links: list[ScrapeRow] = []
+            for attempt in range(3):
+                download_links.clear()
+                try:
+                    tables = self.driver.find_elements(By.TAG_NAME, "table")
+                    print(f"🔍 Found {len(tables)} tables")
 
-            tables = self.driver.find_elements(By.TAG_NAME, "table")
-            print(f"🔍 Found {len(tables)} tables")
+                    for i, table in enumerate(tables):
+                        rows = table.find_elements(By.TAG_NAME, "tr")
+                        print(f"🔍 Table {i}: {len(rows)} rows")
 
-            for i, table in enumerate(tables):
-                rows = table.find_elements(By.TAG_NAME, "tr")
-                print(f"🔍 Table {i}: {len(rows)} rows")
+                        for row in rows:
+                            cells = row.find_elements(By.TAG_NAME, "td")
+                            if len(cells) >= 4:
+                                filename = cells[0].text.strip()
+                                size_cell = cells[1].text.strip() if len(cells) >= 2 else ""
+                                size_b = _parse_krdl_size_bytes(size_cell)
+                                link_cell = cells[-1]
+                                try:
+                                    download_link = link_cell.find_element(By.CSS_SELECTOR, "a")
+                                    href = download_link.get_attribute("href") or ""
+                                    if "/download/" not in href:
+                                        continue
+                                    cont = _container_from_download_href(href)
+                                    if cont is None:
+                                        continue
+                                    if container_filter is not None and cont != container_filter:
+                                        continue
+                                    download_links.append((href, filename, size_b))
+                                    sz_dbg = f"{size_b:,} B" if size_b is not None else "size?"
+                                    print(f"🔍 Found: {filename} ({sz_dbg})")
+                                except Exception:
+                                    pass
+                    break
+                except StaleElementReferenceException:
+                    if attempt < 2:
+                        print(
+                            f"⚠️  Table re-rendered while scraping (attempt {attempt + 1}/3), retrying..."
+                        )
+                        time.sleep(1.0)
+                    else:
+                        raise
 
-                for row in rows:
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if len(cells) >= 4:  # Should have: filename, size, ext, download link
-                        # Get the filename from first cell
-                        filename_cell = cells[0]
-                        filename = filename_cell.text.strip()
-                        size_cell = cells[1].text.strip() if len(cells) >= 2 else ""
-                        size_b = _parse_krdl_size_bytes(size_cell)
-
-                        # Get the download link from last cell
-                        link_cell = cells[-1]
-                        try:
-                            download_link = link_cell.find_element(By.CSS_SELECTOR, "a")
-                            href = download_link.get_attribute("href")
-
-                            if href and "/download/" in href and f"/{extension}" in href:
-                                download_links.append((href, filename, size_b))
-                                sz_dbg = f"{size_b:,} B" if size_b is not None else "size?"
-                                print(f"🔍 Found: {filename} ({sz_dbg})")
-                        except Exception:
-                            pass
-
-            print(f"✅ Found {len(download_links)} download links for extension: {extension}")
+            by_ct = Counter(
+                _container_from_download_href(u) or "?" for u, _fn, _s in download_links
+            )
+            print(f"✅ Parsed {len(download_links)} row(s) from this tab: {dict(by_ct)}")
             return download_links
 
         except Exception as e:
-            print(f"❌ Scraping error: {e}")
+            print(f"❌ Scraping error: {type(e).__name__}: {e}")
             return []
+
+    def scrape_format_tab(self, show_url: str, extension: str) -> list[ScrapeRow]:
+        """One KRDL format tab (…/mkv, …/mp4, or …/avi)."""
+        ext = extension.lower()
+        tab_url = _krdl_show_url_for_file_extension(show_url, ext)
+        return self._scrape_show_tab(tab_url, container_filter=ext)
+
+    def scrape_all_format_tabs(self, show_url: str) -> list[ScrapeRow]:
+        """
+        Three navigations (mkv, mp4, avi tabs) so every listing KRDL splits across tabs is
+        captured; rows are merged (deduped by URL + filename) for :func:`pick_episodes_from_unified_scrape`.
+        """
+        print(
+            "🌐 Full map: scraping .mkv, .mp4, and .avi tabs (3 page loads) before building the queue."
+        )
+        combined: list[ScrapeRow] = []
+        seen: set[tuple[str, str]] = set()
+        for fmt in ALL_CONTAINER_EXTENSIONS:
+            tab_url = _krdl_show_url_for_file_extension(show_url, fmt)
+            print(f"🔍 Format tab .{fmt}: {tab_url!r}")
+            rows = self._scrape_show_tab(tab_url, container_filter=fmt)
+            for r in rows:
+                key = (r[0], r[1].lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined.append(r)
+            print(f"   → {len(rows)} row(s); cumulative unique {len(combined)}")
+        by_ct = Counter(_container_from_download_href(u) or "?" for u, _fn, _s in combined)
+        print(
+            f"✅ Combined unique rows after all tabs: {len(combined)} total {dict(by_ct)} "
+            "→ unified episode queue next."
+        )
+        return combined
+
+    def scrape_show_all_download_rows(self, show_url: str) -> list[ScrapeRow]:
+        """
+        One navigation to the bare show URL: all containers that appear on the combined page.
+        Prefer :meth:`scrape_all_format_tabs` when KRDL splits formats across tabs.
+        """
+        base = _krdl_show_base_url(show_url)
+        print("🌐 Single-page scrape (show base URL; any mkv/mp4/avi rows in one table)")
+        return self._scrape_show_tab(base, container_filter=None)
+
+    def scrape_download_links(self, show_url: str, extension: str = "mkv") -> list[ScrapeRow]:
+        """Compatibility: one format tab only."""
+        return self.scrape_format_tab(show_url, extension)
 
     def download_file(self, url: str, filename: str) -> bool:
         """Download a single file using browser automation"""
@@ -660,184 +918,302 @@ class KrdlSeleniumDownloader:
         except Exception as e:
             print(f"⚠️  Save dialog handling failed: {e}")
 
+    def _is_tiny_preview_complete(self, filename: str) -> bool:
+        """Ep 00 / very small finished file: long cooldown before reusing the slot."""
+        fn = str(filename or "")
+        if not fn:
+            return False
+        if _canonical_episode_key(fn) == "ep:000":
+            return True
+        saved = self._saved_file_path(fn)
+        if saved is None:
+            return False
+        try:
+            return saved.stat().st_size <= _TINY_PREVIEW_MAX_BYTES
+        except OSError:
+            return False
+
+    def _had_byte_progress(self, download_info: dict) -> bool:
+        """True if we ever saw the partial grow (named or claimed) — Chrome may then drop files."""
+        if "last_size" in download_info or "stall_size" in download_info:
+            return True
+        for k, v in download_info.items():
+            if k.startswith("claim_last:"):
+                return True
+            if k.startswith("claim:") and not k.endswith("_since"):
+                if isinstance(v, int) and v > 0:
+                    return True
+        return False
+
+    def _poll_running_slots(
+        self,
+        running_downloads: list,
+        completed_jobs: list,
+        work_q: deque,
+        *,
+        vanished_partial_grace_sec: float,
+        vanished_after_progress_grace_sec: float,
+        idle_no_claim_grace_sec: float,
+        slot_wait_context: bool,
+        slot_wait_loops: int,
+        drain_loops: int,
+    ) -> tuple[bool, bool, int, int]:
+        """
+        Finish or abandon active downloads. Appends DONE/FAIL to ``completed_jobs`` or re-queues
+        jobs that still have ``krdl_retries_left``. Returns
+        ``(slot_freed_by_tiny_preview, had_activity, slot_wait_loops, drain_loops)``.
+        """
+        finished_downloads: list = []
+        abandoned: list = []
+        for download in running_downloads:
+            if self._should_abandon_stalled_download(
+                download,
+                vanished_partial_grace_sec=vanished_partial_grace_sec,
+                vanished_after_progress_grace_sec=vanished_after_progress_grace_sec,
+                idle_no_claim_grace_sec=idle_no_claim_grace_sec,
+            ):
+                abandoned.append(download)
+            elif self._is_download_finished(download):
+                finished_downloads.append(download)
+
+        slot_freed_by_tiny_preview = False
+        for download in abandoned:
+            running_downloads.remove(download)
+            job = download["job"]
+            if job.krdl_retries_left > 0:
+                job.krdl_retries_left -= 1
+                job.status = "QUEUED"
+                work_q.append(job)
+                print(
+                    f"🔄 Transient drop for {job.name!r} — re-queued "
+                    f"({job.krdl_retries_left} extra attempt(s) left)"
+                )
+            else:
+                if job.status != "FAIL":
+                    job.status = "FAIL"
+                completed_jobs.append(job)
+                print(f"❌ Dropped stalled job: {download['filename']!r}")
+
+        for download in finished_downloads:
+            running_downloads.remove(download)
+            job = download["job"]
+            job.status = "DONE"
+            completed_jobs.append(job)
+            fn_done = download["filename"]
+            print(f"✅ Download finished: {fn_done}")
+            if self._is_tiny_preview_complete(fn_done):
+                slot_freed_by_tiny_preview = True
+
+        had_activity = bool(finished_downloads or abandoned)
+        if not had_activity:
+            if slot_wait_context:
+                slot_wait_loops += 1
+                if slot_wait_loops % 24 == 0:
+                    self._log_stuck_poll(running_downloads, slot_wait_loops)
+            else:
+                drain_loops += 1
+                if drain_loops % 24 == 0:
+                    self._log_stuck_poll(running_downloads, drain_loops)
+        else:
+            slot_wait_loops = 0
+            drain_loops = 0
+        return slot_freed_by_tiny_preview, had_activity, slot_wait_loops, drain_loops
+
     def download_queue(
-        self, jobs: list, max_concurrent: int = 2, stagger_seconds: float = 15.0
+        self,
+        jobs: list,
+        max_concurrent: int = 2,
+        stagger_seconds: float = 15.0,
+        tiny_preview_cooldown_seconds: float = 600.0,
+        *,
+        max_transient_retries: int = 3,
+        vanished_partial_grace_sec: float = 300.0,
+        vanished_after_progress_grace_sec: float = 75.0,
+        idle_no_claim_grace_sec: float = 300.0,
     ) -> list:
         """Download files with PROPER QUEUE MANAGEMENT - only start new downloads when others finish"""
         print(f"🚀 Starting download queue with max {max_concurrent} concurrent downloads...")
         print("⚠️  Note: Downloads can take 5+ minutes each. Be patient!")
         print(f"⚠️  CRITICAL: Only {max_concurrent} downloads will run at once!")
+        if max_transient_retries > 0:
+            print(
+                f"🔄 Up to {max_transient_retries} automatic re-queue(s) per job after vanished "
+                "partials / stalled handoffs (ethernet↔WiFi, browser hiccups)."
+            )
+        if tiny_preview_cooldown_seconds > 0:
+            print(
+                f"⏸️  Tiny preview / ep 00 slot cooldown: {tiny_preview_cooldown_seconds:g}s after "
+                "such a file finishes and frees a slot (use --tiny-preview-cooldown-seconds 0 to "
+                "disable)."
+            )
         if stagger_seconds > 0:
             print(
                 f"⏸️  Between-slot stagger: {stagger_seconds:g}s pause before each new download "
                 "after the first batch (helps avoid krdl session / rate kicks)."
             )
 
-        completed_jobs = []
-        running_downloads = []  # Track active downloads
-        slot_wait_loops = 0
-
-        for i, job in enumerate(jobs):
+        completed_jobs: list = []
+        work_q: deque = deque()
+        for job in jobs:
             if job.status == "SKIP":
                 completed_jobs.append(job)
-                continue
+            else:
+                work_q.append(job)
 
-            print(f"📥 Queueing download {i + 1}/{len(jobs)}: {job.name}")
+        running_downloads: list = []
+        slot_wait_loops = 0
+        drain_loops = 0
+        jobs_started = 0
 
+        while work_q or running_downloads:
             waited_for_slot = False
-            # WAIT until we have space for a new download
+            slot_freed_by_tiny_preview = False
             while len(running_downloads) >= max_concurrent:
                 waited_for_slot = True
                 print(
                     f"⏳ {len(running_downloads)} downloads running, waiting for one to finish..."
                 )
-                time.sleep(5)  # Check every 5 seconds
-
-                # Check if any downloads have finished (or stalled with no real progress)
-                finished_downloads = []
-                abandoned = []
-                for download in running_downloads:
-                    if self._should_abandon_stalled_download(download):
-                        abandoned.append(download)
-                    elif self._is_download_finished(download):
-                        finished_downloads.append(download)
-
-                for download in abandoned:
-                    running_downloads.remove(download)
-                    completed_jobs.append(download["job"])
-                    print(f"❌ Dropped stalled job (slot freed): {download['filename']!r}")
-
-                # Remove finished downloads
-                for download in finished_downloads:
-                    running_downloads.remove(download)
-                    print(f"✅ Download finished: {download['filename']}")
-
-                if not finished_downloads and not abandoned:
-                    slot_wait_loops += 1
-                    if slot_wait_loops % 24 == 0:
-                        self._log_stuck_poll(running_downloads, slot_wait_loops)
-                else:
-                    slot_wait_loops = 0
-
-            slot_wait_loops = 0
-
-            if waited_for_slot and stagger_seconds > 0:
-                print(
-                    f"⏸️  Pausing {stagger_seconds:g}s before starting next download "
-                    "(server cooldown)..."
+                time.sleep(5)
+                tiny_prev, _, slot_wait_loops, drain_loops = self._poll_running_slots(
+                    running_downloads,
+                    completed_jobs,
+                    work_q,
+                    vanished_partial_grace_sec=vanished_partial_grace_sec,
+                    vanished_after_progress_grace_sec=vanished_after_progress_grace_sec,
+                    idle_no_claim_grace_sec=idle_no_claim_grace_sec,
+                    slot_wait_context=True,
+                    slot_wait_loops=slot_wait_loops,
+                    drain_loops=drain_loops,
                 )
-                time.sleep(stagger_seconds)
+                slot_freed_by_tiny_preview = slot_freed_by_tiny_preview or tiny_prev
 
-            # Start new download
-            print(f"🚀 Starting download: {job.name}")
-            print(f"🔍 Download URL: {job.url}")
+            if waited_for_slot:
+                if tiny_preview_cooldown_seconds > 0 and slot_freed_by_tiny_preview:
+                    print(
+                        f"⏸️  Tiny preview / ep 00 finished — pausing {tiny_preview_cooldown_seconds:g}s "
+                        "before next download..."
+                    )
+                    time.sleep(tiny_preview_cooldown_seconds)
+                elif stagger_seconds > 0:
+                    print(
+                        f"⏸️  Pausing {stagger_seconds:g}s before starting next download "
+                        "(server cooldown)..."
+                    )
+                    time.sleep(stagger_seconds)
 
-            # DON'T clear session data - keep the login session active
-            print("🔍 Keeping login session active (not clearing data)")
+            if len(running_downloads) < max_concurrent and work_q:
+                job = work_q.popleft()
+                jobs_started += 1
+                print(f"📥 Queueing download {jobs_started}: {job.name}")
 
-            # Navigate to download URL to start download
-            print("🔍 Navigating to download URL...")
-            out_expected = self.target_dir / job.name
-            stale_partial = self.target_dir / f"{job.name}.crdownload"
-            if stale_partial.is_file() and not out_expected.is_file():
+                print(f"🚀 Starting download: {job.name}")
+                print(f"🔍 Download URL: {job.url}")
+                print("🔍 Keeping login session active (not clearing data)")
+                print("🔍 Navigating to download URL...")
+                out_expected = self.target_dir / job.name
+                stale_partial = self.target_dir / f"{job.name}.crdownload"
+                if stale_partial.is_file() and not out_expected.is_file():
+                    try:
+                        stale_partial.unlink()
+                        print(
+                            f"🧹 Removed stale partial so Chrome can retry: {stale_partial.name}"
+                        )
+                    except OSError as e:
+                        print(f"⚠️  Could not remove stale partial {stale_partial.name}: {e}")
+                cr_before = frozenset(self._crdownload_basenames())
+                self.driver.get(job.url)
+                time.sleep(3)
+
+                current_url = self.driver.current_url
+                print(f"🔍 Current URL after navigation: {current_url}")
+                print(f"🔍 Page title: {self.driver.title}")
+
                 try:
-                    stale_partial.unlink()
-                    print(f"🧹 Removed stale partial so Chrome can retry: {stale_partial.name}")
-                except OSError as e:
-                    print(f"⚠️  Could not remove stale partial {stale_partial.name}: {e}")
-            cr_before = frozenset(self._crdownload_basenames())
-            self.driver.get(job.url)
-            time.sleep(3)  # Let redirect / download handoff settle (was 2s; krdl is sensitive)
+                    error_elements = self.driver.find_elements(
+                        By.CSS_SELECTOR, ".alert, .error, .warning, .message"
+                    )
+                    if error_elements:
+                        for elem in error_elements:
+                            print(f"🔍 Error message on page: {elem.text}")
+                except Exception:
+                    pass
 
-            # Log current state after navigation
-            current_url = self.driver.current_url
-            print(f"🔍 Current URL after navigation: {current_url}")
-            print(f"🔍 Page title: {self.driver.title}")
+                current_url = self.driver.current_url
+                if "register" in current_url.lower() or "premium" in current_url.lower():
+                    print("🚨 RATE LIMIT REDIRECT DETECTED!")
+                    print(f"🚨 Current URL: {current_url}")
+                    print("🚨 This means your account has been rate-limited")
+                    print("🚨 STOPPING ALL DOWNLOADS TO AVOID FURTHER PUNISHMENT")
+                    print("🚨 Please wait 15 minutes before trying again")
+                    for d in running_downloads:
+                        d["job"].status = "FAIL"
+                        completed_jobs.append(d["job"])
+                    running_downloads.clear()
+                    while work_q:
+                        rj = work_q.popleft()
+                        rj.status = "FAIL"
+                        completed_jobs.append(rj)
+                    return completed_jobs
 
-            # Check for any error messages on the page
-            try:
-                error_elements = self.driver.find_elements(
-                    By.CSS_SELECTOR, ".alert, .error, .warning, .message"
+                if "gen.krdl.moe" in current_url:
+                    print(f"✅ Redirected to download server: {current_url}")
+                else:
+                    print(f"🔍 Current URL: {current_url}")
+
+                began, claimed_new = self._wait_for_download_begin_signal(
+                    job.name, cr_before, timeout_sec=90
                 )
-                if error_elements:
-                    for elem in error_elements:
-                        print(f"🔍 Error message on page: {elem.text}")
-            except Exception:
-                pass
+                if not began:
+                    print(
+                        f"❌ No download began for {job.name!r} within 90s "
+                        "(no gen.krdl redirect, no new .crdownload, no file)."
+                    )
+                    if job.krdl_retries_left > 0:
+                        job.krdl_retries_left -= 1
+                        job.status = "QUEUED"
+                        work_q.append(job)
+                        print(
+                            f"🔄 Re-queueing ({job.krdl_retries_left} extra attempt(s) left) "
+                            "— check network / rate limits."
+                        )
+                    else:
+                        job.status = "FAIL"
+                        completed_jobs.append(job)
+                    continue
 
-            # Check for register/premium redirect - GRACEFUL STOP
-            current_url = self.driver.current_url
-            if "register" in current_url.lower() or "premium" in current_url.lower():
-                print("🚨 RATE LIMIT REDIRECT DETECTED!")
-                print(f"🚨 Current URL: {current_url}")
-                print("🚨 This means your account has been rate-limited")
-                print("🚨 STOPPING ALL DOWNLOADS TO AVOID FURTHER PUNISHMENT")
-                print("🚨 Please wait 15 minutes before trying again")
-                return completed_jobs  # Stop immediately
+                download_info = {
+                    "job": job,
+                    "filename": job.name,
+                    "start_time": time.time(),
+                    "url": job.url,
+                    "claimed_crdownloads": set(claimed_new),
+                }
+                if claimed_new:
+                    print(
+                        f"🔖 Tracking Chrome partial(s) for this job: "
+                        f"{', '.join(sorted(claimed_new))}"
+                    )
 
-            # Check if we got redirected to gen.krdl.moe (good sign)
-            if "gen.krdl.moe" in current_url:
-                print(f"✅ Redirected to download server: {current_url}")
-            else:
-                print(f"🔍 Current URL: {current_url}")
-
-            began, claimed_new = self._wait_for_download_begin_signal(
-                job.name, cr_before, timeout_sec=90
-            )
-            if not began:
+                running_downloads.append(download_info)
+                print(f"📊 Active downloads: {len(running_downloads)}/{max_concurrent}")
+            elif running_downloads:
                 print(
-                    f"❌ No download began for {job.name!r} within 90s "
-                    "(no gen.krdl redirect, no new .crdownload, no file). "
-                    "Not reserving a slot — fix rate limits / network and re-run."
+                    f"⏳ Waiting for {len(running_downloads)} remaining download(s) to finish..."
                 )
-                job.status = "FAIL"
-                completed_jobs.append(job)
-                continue
-
-            download_info = {
-                "job": job,
-                "filename": job.name,
-                "start_time": time.time(),
-                "url": job.url,
-                "claimed_crdownloads": set(claimed_new),
-            }
-            if claimed_new:
-                print(
-                    f"🔖 Tracking Chrome partial(s) for this job: {', '.join(sorted(claimed_new))}"
+                time.sleep(5)
+                _, _, slot_wait_loops, drain_loops = self._poll_running_slots(
+                    running_downloads,
+                    completed_jobs,
+                    work_q,
+                    vanished_partial_grace_sec=vanished_partial_grace_sec,
+                    vanished_after_progress_grace_sec=vanished_after_progress_grace_sec,
+                    idle_no_claim_grace_sec=idle_no_claim_grace_sec,
+                    slot_wait_context=False,
+                    slot_wait_loops=slot_wait_loops,
+                    drain_loops=drain_loops,
                 )
-
-            running_downloads.append(download_info)
-            print(f"📊 Active downloads: {len(running_downloads)}/{max_concurrent}")
-
-        # Wait for remaining downloads to finish
-        print(f"⏳ Waiting for {len(running_downloads)} remaining downloads to finish...")
-        drain_loops = 0
-        while running_downloads:
-            time.sleep(5)
-            finished_downloads = []
-            abandoned = []
-            for download in running_downloads:
-                if self._should_abandon_stalled_download(download):
-                    abandoned.append(download)
-                elif self._is_download_finished(download):
-                    finished_downloads.append(download)
-                    print(f"✅ Download completed: {download['filename']}")
-
-            for download in abandoned:
-                running_downloads.remove(download)
-                completed_jobs.append(download["job"])
-                print(f"❌ Dropped stalled job: {download['filename']!r}")
-
-            # Remove finished downloads
-            for download in finished_downloads:
-                running_downloads.remove(download)
-
-            if not finished_downloads and not abandoned:
-                drain_loops += 1
-                if drain_loops % 24 == 0:
-                    self._log_stuck_poll(running_downloads, drain_loops)
             else:
-                drain_loops = 0
+                break
 
         print("🎉 All downloads completed!")
         return completed_jobs
@@ -945,10 +1321,23 @@ class KrdlSeleniumDownloader:
             time.sleep(2)
         return False, frozenset()
 
-    def _should_abandon_stalled_download(self, download_info: dict) -> bool:
+    def _should_abandon_stalled_download(
+        self,
+        download_info: dict,
+        *,
+        vanished_partial_grace_sec: float = 300.0,
+        vanished_after_progress_grace_sec: float = 75.0,
+        idle_no_claim_grace_sec: float = 300.0,
+    ) -> bool:
         """
         Drop jobs that will never satisfy _is_download_finished: frozen named partial,
         or no file / no named partial for so long that Chrome almost certainly never attached.
+
+        ``vanished_partial_grace_sec``: if we never saw byte progress, wait this long after claimed
+        partials vanish before abandoning (slow / flaky first bytes).
+
+        ``vanished_after_progress_grace_sec``: if we *did* see progress then Chrome removed all
+        ``.crdownload`` files, abandon after this shorter window so slots do not sit stuck for minutes.
         """
         job = download_info.get("job")
         fn = str(download_info.get("filename") or "")
@@ -1014,12 +1403,16 @@ class KrdlSeleniumDownloader:
 
         if claimed and not any_claim_file:
             van = download_info.get("claim_vanished_since")
+            eff_vanish = float(vanished_partial_grace_sec)
+            if self._had_byte_progress(download_info):
+                eff_vanish = min(eff_vanish, float(vanished_after_progress_grace_sec))
             if van is None:
                 download_info["claim_vanished_since"] = now
-            elif now - van >= 90:
+            elif now - van >= eff_vanish:
                 print(
                     f"❌ Giving up on {fn!r}: claimed .crdownload(s) vanished with no "
-                    f".mkv ({list(claimed)!r}) — Chrome may have cancelled the transfer"
+                    f"finished file ({list(claimed)!r}) — Chrome may have cancelled the transfer "
+                    f"(grace {eff_vanish:.0f}s)"
                 )
                 if job is not None:
                     job.status = "FAIL"
@@ -1027,9 +1420,24 @@ class KrdlSeleniumDownloader:
         else:
             download_info.pop("claim_vanished_since", None)
 
-        if not claimed and elapsed >= 180:
+        if not claimed and self._had_byte_progress(download_info):
+            o = download_info.get("byte_progress_orphan_since")
+            if o is None:
+                download_info["byte_progress_orphan_since"] = now
+            elif now - o >= float(vanished_after_progress_grace_sec):
+                print(
+                    f"❌ Giving up on {fn!r}: partial(s) gone after receiving data, "
+                    f"no finished file (grace {vanished_after_progress_grace_sec:.0f}s)"
+                )
+                if job is not None:
+                    job.status = "FAIL"
+                return True
+        else:
+            download_info.pop("byte_progress_orphan_since", None)
+
+        if not claimed and elapsed >= float(idle_no_claim_grace_sec):
             print(
-                f"❌ Giving up on {fn!r}: no .mkv, no named partial, no claimed .crdownload "
+                f"❌ Giving up on {fn!r}: no finished file, no named partial, no claimed .crdownload "
                 f"after {elapsed:.0f}s (nothing to track — likely never really started)"
             )
             if job is not None:
@@ -1105,8 +1513,14 @@ class KrdlSeleniumDownloader:
 
     def close(self):
         """Close the browser"""
-        if self.driver:
+        if not self.driver:
+            return
+        try:
             self.driver.quit()
+        except Exception as e:
+            print(f"⚠️  Browser already closed or quit failed: {e}")
+        finally:
+            self.driver = None
 
 
 def main():
@@ -1115,9 +1529,18 @@ def main():
     ap.add_argument("--target", required=True, help="Directory to save downloads (REQUIRED)")
     ap.add_argument(
         "--ext",
-        choices=["mkv", "mp4"],
+        choices=["mkv", "mp4", "avi"],
         default="mkv",
-        help="Which video extension to download (default: mkv)",
+        help=(
+            "Preferred container (default: mkv). Default run scans .mkv, .mp4, and .avi tabs "
+            "(3 loads), merges rows, then picks one row per episode (preference MKV→MP4→AVI, etc.) "
+            "and your --quality rules. See --strict-ext."
+        ),
+    )
+    ap.add_argument(
+        "--strict-ext",
+        action="store_true",
+        help="Only open the --ext tab (1 load); no mkv/mp4/avi merge or cross-format fallback.",
     )
     ap.add_argument(
         "--quality",
@@ -1145,6 +1568,17 @@ def main():
         ),
     )
     ap.add_argument(
+        "--tiny-preview-cooldown-seconds",
+        type=float,
+        default=600.0,
+        metavar="SEC",
+        help=(
+            "After ep 00 or a very small finished file (≤60 MiB) frees a download slot, wait this "
+            "long before starting the next job (default: 600). Use 0 to disable. Other slot frees "
+            "still use only --stagger-seconds."
+        ),
+    )
+    ap.add_argument(
         "--gap-fill-second-pass",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1152,6 +1586,46 @@ def main():
             "After the main queue, find episode/movie keys still missing on disk and queue the "
             "next-best alternate release per key (different encode/group). Disable with "
             "--no-gap-fill-second-pass."
+        ),
+    )
+    ap.add_argument(
+        "--max-download-retries",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "After a transient failure (vanished .crdownload, never-started handoff), re-queue the "
+            "same job up to N times before giving up (default: 3)."
+        ),
+    )
+    ap.add_argument(
+        "--vanished-partial-grace-seconds",
+        type=float,
+        default=300.0,
+        metavar="SEC",
+        help=(
+            "If claimed .crdownload names vanish before any byte progress was seen, wait this long "
+            "before abandoning (default: 300). After progress, "
+            "--vanished-after-progress-grace-seconds applies instead."
+        ),
+    )
+    ap.add_argument(
+        "--vanished-after-progress-grace-seconds",
+        type=float,
+        default=75.0,
+        metavar="SEC",
+        help=(
+            "If we already saw the partial grow then all .crdownload files disappear, abandon and "
+            "re-queue after this many seconds (default: 75). Prevents 2-slot deadlock for minutes."
+        ),
+    )
+    ap.add_argument(
+        "--idle-no-claim-grace-seconds",
+        type=float,
+        default=300.0,
+        metavar="SEC",
+        help=(
+            "With no partial file to track, abandon after this many seconds (default: 300)."
         ),
     )
     args = ap.parse_args()
@@ -1194,22 +1668,52 @@ def main():
             print("❌ Login failed. Exiting...")
             return
 
-        # Scrape download links
-        raw_urls = downloader.scrape_download_links(args.url, args.ext)
-        download_urls, ranked_by_key = filter_by_quality_preference(raw_urls, args.quality)
+        ext_try = _container_ext_try_order(args.ext, strict=args.strict_ext)
+        existing_extensions = (ext_try[0],) if args.strict_ext else ALL_CONTAINER_EXTENSIONS
+
+        if args.strict_ext:
+            raw_rows = downloader.scrape_format_tab(args.url, ext_try[0])
+        else:
+            raw_rows = downloader.scrape_all_format_tabs(args.url)
+        if not raw_rows:
+            print("❌ No usable mkv/mp4/avi download rows after scraping.")
+            return
+
+        download_urls, ranked_by_key, chosen_fmt_by_key = pick_episodes_from_unified_scrape(
+            raw_rows,
+            args.quality,
+            ext_try,
+            strict_container=args.strict_ext,
+        )
 
         if not download_urls:
-            print("❌ No download links found on the page")
+            print("❌ No episodes to download after unified episode pick (unexpected).")
             return
+
+        primary = ext_try[0]
+        if not args.strict_ext:
+            fb = sum(1 for f in chosen_fmt_by_key.values() if f != primary)
+            if fb:
+                print(
+                    f"📦 Per-episode container fallback: {fb} key(s) use a non-preferred format "
+                    f"(preference .{primary}). Mix: {dict(Counter(chosen_fmt_by_key.values()))}"
+                )
 
         # CRITICAL: Check for duplicates BEFORE any downloads start
         print("🔍 Checking for existing files to avoid duplicates...")
+        n_exist = len(_existing_media_basenames_for_extensions(target_dir, existing_extensions))
         print(
-            f"🔍 Found {len(_existing_media_basenames(target_dir, args.ext))} existing "
-            f"{args.ext!r} files in target directory"
+            f"🔍 Found {n_exist} existing on-disk file(s) "
+            f"(extensions: {', '.join(existing_extensions)})"
         )
 
-        filtered_items = filter_scrape_rows_not_on_disk(download_urls, target_dir, args.ext)
+        filtered_items = filter_scrape_rows_not_on_disk(
+            download_urls,
+            target_dir,
+            existing_extensions,
+            log_skips=True,
+            skip_if_canonical_key_on_disk=True,
+        )
         print(f"📊 After duplicate check: {len(filtered_items)} downloads to start")
 
         def rows_to_jobs(rows: list[ScrapeRow]) -> list[Job]:
@@ -1222,12 +1726,12 @@ def main():
                         out_path=target_dir / filename,
                         status="QUEUED",
                         expected_bytes=expected_bytes,
+                        krdl_retries_left=max(0, int(args.max_download_retries)),
                     )
                 )
             return jobs_out
 
-        # Prepare jobs with filtered URLs and filenames
-        print(f"📁 Preparing jobs for {args.ext} files...")
+        print("📁 Preparing download jobs (mixed .mkv / .mp4 / .avi names are OK)…")
         jobs = rows_to_jobs(filtered_items)
 
         # Apply limit to the number of downloads (not the filtered list)
@@ -1248,6 +1752,13 @@ def main():
                 queued_jobs,
                 max_concurrent=2,
                 stagger_seconds=args.stagger_seconds,
+                tiny_preview_cooldown_seconds=args.tiny_preview_cooldown_seconds,
+                max_transient_retries=max(0, int(args.max_download_retries)),
+                vanished_partial_grace_sec=float(args.vanished_partial_grace_seconds),
+                vanished_after_progress_grace_sec=float(
+                    args.vanished_after_progress_grace_seconds
+                ),
+                idle_no_claim_grace_sec=float(args.idle_no_claim_grace_seconds),
             )
 
             successful = [j for j in completed_jobs if j.status == "DONE"]
@@ -1258,11 +1769,38 @@ def main():
             print(f"  ✅ Successful: {len(successful)}")
             print(f"  ❌ Failed: {len(failed)}")
             print(f"  ⏭️  Skipped: {len(skipped)}")
+            if failed:
+                on_disk_keys = discover_canonical_keys_on_disk_multi(
+                    target_dir, ALL_CONTAINER_EXTENSIONS
+                )
+                missing_ep = [
+                    j
+                    for j in failed
+                    if j.name
+                    and (not _canonical_episode_key(j.name).startswith("unique:"))
+                    and _canonical_episode_key(j.name) not in on_disk_keys
+                ]
+                if missing_ep:
+                    sample = ", ".join(f"{j.name!r}" for j in missing_ep[:8])
+                    more = f" (+{len(missing_ep) - 8} more)" if len(missing_ep) > 8 else ""
+                    print(
+                        f"\n⚠️  {len(missing_ep)} job(s) failed and episode key still missing on disk: "
+                        f"{sample}{more}. Re-run after fixing network; tuning: --max-download-retries, "
+                        f"--vanished-after-progress-grace-seconds, --vanished-partial-grace-seconds."
+                    )
 
         if args.gap_fill_second_pass:
-            gap_candidates = build_gap_fill_rows(ranked_by_key, target_dir, args.ext)
+            gap_candidates = build_gap_fill_rows(
+                ranked_by_key,
+                target_dir,
+                existing_extensions,
+            )
             gap_filtered = filter_scrape_rows_not_on_disk(
-                gap_candidates, target_dir, args.ext, log_skips=True
+                gap_candidates,
+                target_dir,
+                existing_extensions,
+                log_skips=True,
+                skip_if_canonical_key_on_disk=True,
             )
             if gap_filtered:
                 print(
@@ -1277,6 +1815,13 @@ def main():
                     gap_jobs,
                     max_concurrent=2,
                     stagger_seconds=args.stagger_seconds,
+                    tiny_preview_cooldown_seconds=args.tiny_preview_cooldown_seconds,
+                    max_transient_retries=max(0, int(args.max_download_retries)),
+                    vanished_partial_grace_sec=float(args.vanished_partial_grace_seconds),
+                    vanished_after_progress_grace_sec=float(
+                        args.vanished_after_progress_grace_seconds
+                    ),
+                    idle_no_claim_grace_sec=float(args.idle_no_claim_grace_seconds),
                 )
                 gs = [j for j in gap_completed if j.status == "DONE"]
                 gf = [j for j in gap_completed if j.status == "FAIL"]
@@ -1288,13 +1833,16 @@ def main():
             else:
                 rem = {
                     k for k in ranked_by_key if not k.startswith("unique:")
-                } - discover_canonical_keys_on_disk(target_dir, args.ext)
+                } - discover_canonical_keys_on_disk_multi(target_dir, ALL_CONTAINER_EXTENSIONS)
                 if rem:
                     print(
                         "\n⚠️  Gap-fill: some keys still have no file on disk but no alternates "
                         f"remain in the scrape (example keys: {', '.join(sorted(rem)[:5])})."
                     )
 
+    except Exception:
+        traceback.print_exc()
+        print("❌ Unhandled error — see traceback above.")
     finally:
         downloader.close()
 

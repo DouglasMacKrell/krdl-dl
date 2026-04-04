@@ -20,6 +20,8 @@ What krdl-dl runs on and how the repo is wired for development and CI.
 | **requests** | HTTP in `csvdl_core` (login/scrape helpers, tests) |
 | **beautifulsoup4** | HTML parsing in `csvdl_core` fallback scraper |
 
+The primary CLI path is **`krdl_selenium.py`** (multi-tab scrape, unified episode pick, 2-slot queue with optional retries). **`csvdl_core.Job`** carries download state including **`krdl_retries_left`** for transient re-queues.
+
 Exact minimum versions are pinned in `requirements.txt`.
 
 ## Development (`requirements-dev.txt`)

@@ -11,18 +11,20 @@ A Selenium-based automated downloader for [krdl.moe](https://krdl.moe) (tokusats
 [![CI](https://github.com/DouglasMacKrell/krdl-dl/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/DouglasMacKrell/krdl-dl/actions/workflows/ci.yml)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-**Current release:** [v1.1.0](https://github.com/DouglasMacKrell/krdl-dl/releases/tag/v1.1.0) (2026-03-28) — [changelog](CHANGELOG.md).
+**Current release:** [v1.2.0](https://github.com/DouglasMacKrell/krdl-dl/releases/tag/v1.2.0) (2026-03-27) — [changelog](CHANGELOG.md).
 
 ## Features
 
 - **Authenticated downloads** via Selenium (Chrome) and your krdl credentials
 - **Show-page scraping** with pagination set to **All** so long series are fully listed
-- **Extension filter**: `--ext mkv` or `--ext mp4` (only links matching that type are queued)
-- **Per-episode quality selection** (`--quality hd` default): uses **KRDL table file sizes** (MiB/GiB) as the main signal; `hd` prefers the **larger** file per episode, `sd` the **smaller**; filenames containing `_HD_` break ties
-- **Canonical episode keys** so multiple releases (e.g. SD + HD, different groups) collapse to **one** download per episode when both map to the same number; specials/movies use dedicated keys (including `_The_Movie_` style names)
+- **Multi-tab scrape** (default): **`mkv`**, **`mp4`**, and **`avi`** episode tables are loaded and merged; **`--ext`** sets *preference order* (`MKV→MP4→AVI` by default), then **one row per canonical episode** is chosen. Use **`--strict-ext`** for a single tab only (no cross-format merge).
+- **Per-episode quality selection** (`--quality hd` default): uses **KRDL table file sizes** (MiB/GiB), **`_vN_`** versioning, and **`_HD_`** in filenames as tie-breakers (`hd` = larger, `sd` = smaller among same-key rows)
+- **Canonical episode keys** so multiple releases (different groups, T-N dash names, etc.) collapse to **one** download per episode; movies include **`movie`** vs **`movie:hong_kong`** where applicable; some specials use stable **`special:…`** keys; unknown shapes use **`unique:…`**
 - **Two concurrent downloads** (`max_concurrent=2`), aligned with krdl free-tier messaging
-- **Configurable stagger** (`--stagger-seconds`) before starting the next job after a slot frees—helps avoid aggressive back-to-back hits when chaining many files
-- **Duplicate skip** using **finished** `*.{ext}` files only (stale `.crdownload` partials are **not** treated as “already downloaded”); optional removal of a matching stale partial before retry
+- **Configurable stagger** (`--stagger-seconds`) and **tiny-preview / ep 00 cooldown** (`--tiny-preview-cooldown-seconds`, default 600s) before the next job after certain slot frees
+- **Duplicate skip**: finished **`mkv` / `mp4` / `avi`** on disk; also **skip by canonical key** so you do not re-fetch an AVI when the same episode is already present as MKV (and vice versa). Stale `.crdownload` files are **not** treated as complete
+- **Transient retries** (`--max-download-retries`, default 3): vanished Chrome partials or failed “download began” handoffs re-queue the same job instead of skipping episodes
+- **Gap-fill pass** (on by default; **`--no-gap-fill-second-pass`** to disable): optional second pass queues the **next-best alternate** per key still missing on disk after the main run
 - **Download tracking** via final filenames plus `*.crdownload` (including per-job **claimed** partials from Chrome)
 - **Rate-limit / premium redirect** detection: stops the queue instead of hammering the site
 - **`--limit`** for dry runs or sampling
@@ -68,7 +70,7 @@ python3 krdl_selenium.py \
   --quality hd
 ```
 
-Shows that list both a small and a large MKV for the same episode (e.g. old rip vs HD) will select the **larger** row when `--quality hd` is used. Use `--quality sd` if you explicitly want the smaller rips. Only rows for the chosen `--ext` participate in comparison.
+Within each **canonical key**, `hd`/`sd` and size/`_vN_`/`_HD_` rules pick one row. With the default multi-tab scrape, **container preference** follows `--ext` order (e.g. **`--ext mkv`** tries to keep MKV when available). **`--strict-ext`** restricts scraping and comparison to that container only.
 
 ### Gentle pacing (after rate kicks)
 
@@ -87,6 +89,13 @@ python3 krdl_selenium.py \
 # Cap how many new files this run will start (existing files on disk still skipped first)
 python3 krdl_selenium.py --url "…" --target "…" --ext mkv --limit 3
 
+# Single-format tab only (1 page load, no mkv/mp4/avi merge)
+python3 krdl_selenium.py --url "…" --target "…" --ext mkv --strict-ext
+
+# After flaky WiFi: more re-tries and tuning for vanished Chrome partials
+python3 krdl_selenium.py --url "…" --target "…" --ext mkv \
+  --max-download-retries 5 --vanished-after-progress-grace-seconds 60
+
 # Headless Chrome
 python3 krdl_selenium.py --url "…" --target "…" --ext mkv --headless
 
@@ -96,13 +105,22 @@ python3 krdl_selenium.py --url "…" --target "…" --username "…" --password 
 
 ## CLI reference
 
+See `python3 krdl_selenium.py --help` for the full list. Common arguments:
+
 | Argument | Required | Description | Default |
 |----------|----------|-------------|---------|
 | `--url` | Yes | krdl.moe show page URL | — |
 | `--target` | Yes | Directory for downloads (created if needed) | — |
-| `--ext` | No | `mkv` or `mp4` | `mkv` |
-| `--quality` | No | `hd` = prefer larger table size per episode (tie: `_HD_` in name); `sd` = prefer smaller (tie: avoid `_HD_`); missing tier still picks the only row | `hd` |
-| `--stagger-seconds` | No | Seconds to sleep before starting a download **after** waiting for a free slot | `15` (`0` disables) |
+| `--ext` | No | Preferred container: `mkv`, `mp4`, or `avi` (default multi-tab merge uses this as preference order) | `mkv` |
+| `--strict-ext` | No | Only scrape the `--ext` tab; no merge/fallback across mkv/mp4/avi | off |
+| `--quality` | No | `hd` / `sd` per canonical key (`_vN_`, size, `_HD_` ties) | `hd` |
+| `--stagger-seconds` | No | Pause before starting a download **after** waiting for a free slot | `15` (`0` disables) |
+| `--tiny-preview-cooldown-seconds` | No | Extra pause after ep 00 / tiny complete file frees a slot | `600` |
+| `--gap-fill-second-pass` | No | Boolean: run alternate-release pass for missing keys (use `--no-gap-fill-second-pass`) | on |
+| `--max-download-retries` | No | Re-queue a job after transient partial/begin failures | `3` |
+| `--vanished-partial-grace-seconds` | No | Abandon if claimed partials vanish **before** byte progress was seen | `300` |
+| `--vanished-after-progress-grace-seconds` | No | Abandon if partials vanish **after** data was moving (frees stuck slots) | `75` |
+| `--idle-no-claim-grace-seconds` | No | Abandon when nothing to track on disk | `300` |
 | `--limit` | No | Max **new** jobs to start this run (after dedupe) | no limit |
 | `--headless` | No | Run Chrome headless | off |
 | `--username` / `--password` | No | Override `.env` | from `.env` |
@@ -110,12 +128,13 @@ python3 krdl_selenium.py --url "…" --target "…" --username "…" --password 
 ## How it works (short)
 
 1. Load `.env`, start Chrome with download directory set to `--target`.
-2. Log in to krdl; navigate to `--url`.
-3. Set the DataTables-style length menu to **All**; read each row’s **filename**, **size**, and **download** link for the requested extension.
-4. **Quality pass**: group rows by a parsed **canonical episode/movie key**; keep one row per key per `--quality` rules.
-5. **Disk dedupe**: skip any file whose final `*.{ext}` already exists (prefix rules avoid obvious collisions).
-6. **Queue**: at most two active downloads; each job hits its download URL in the same tab; wait for gen.krdl / partial / file signals before counting a slot full.
-7. On premium/register-style URL, **stop** the run.
+2. Log in to krdl.
+3. **Scrape** (default): for each of **`mkv` / `mp4` / `avi`**, open the show’s format tab, set **All** rows, parse **filename**, **size**, **href**; merge and dedupe rows. With **`--strict-ext`**, only one tab.
+4. **Unified pick**: group by **canonical episode key**; sort by **`--ext`** preference, `--quality`, `_vN_`, size, `_HD_`; keep **one primary row per key** (plus ranked alternates for gap-fill).
+5. **Disk dedupe**: skip exact basenames, stem collisions, and any row whose **canonical key** is already satisfied by **any** video extension on disk.
+6. **Queue**: at most two active downloads (`deque` work list); transient failures **re-queue** up to **`--max-download-retries`**; stall windows use **vanished / idle** grace flags (shorter after byte progress when Chrome drops partials).
+7. Optional **gap-fill** pass for keys still missing with alternates in the scrape.
+8. On premium/register-style URL, **stop** and mark remaining jobs failed.
 
 See [docs/architecture.md](docs/architecture.md) for detail and limitations.
 
@@ -160,7 +179,7 @@ krdl-dl/
 
 ## Roadmap (high level)
 
-Ideas that are **not** implemented yet: richer TUI, persisted resume state, multi-show batch CLI, stronger automated retry policies. Current releases are listed in [CHANGELOG.md](CHANGELOG.md).
+Ideas that are **not** implemented yet: richer TUI, persisted resume state, multi-show batch CLI. Current releases are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing
 

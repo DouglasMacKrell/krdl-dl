@@ -35,6 +35,8 @@ class Job:
     out_path: Path | None = None
     status: str = "QUEUED"  # QUEUED | RUNNING | DONE | SKIP | FAIL | PAUSED
     message: str = ""
+    # Re-queue after transient browser/network drops (vanished partials, etc.); decremented in downloader.
+    krdl_retries_left: int = 0
 
 
 def expand(p: str) -> str:
