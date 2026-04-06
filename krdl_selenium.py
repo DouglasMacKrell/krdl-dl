@@ -429,9 +429,7 @@ def build_gap_fill_rows(
     if not missing:
         return []
 
-    existing_lower = _existing_media_basenames_for_extensions(
-        target_dir, ALL_CONTAINER_EXTENSIONS
-    )
+    existing_lower = _existing_media_basenames_for_extensions(target_dir, ALL_CONTAINER_EXTENSIONS)
     out: list[ScrapeRow] = []
     for key in sorted(missing, key=_canonical_key_sort_key):
         alts = ranked_by_key.get(key, [])
@@ -1118,9 +1116,7 @@ class KrdlSeleniumDownloader:
                 if stale_partial.is_file() and not out_expected.is_file():
                     try:
                         stale_partial.unlink()
-                        print(
-                            f"🧹 Removed stale partial so Chrome can retry: {stale_partial.name}"
-                        )
+                        print(f"🧹 Removed stale partial so Chrome can retry: {stale_partial.name}")
                     except OSError as e:
                         print(f"⚠️  Could not remove stale partial {stale_partial.name}: {e}")
                 cr_before = frozenset(self._crdownload_basenames())
@@ -1200,9 +1196,7 @@ class KrdlSeleniumDownloader:
                 running_downloads.append(download_info)
                 print(f"📊 Active downloads: {len(running_downloads)}/{max_concurrent}")
             elif running_downloads:
-                print(
-                    f"⏳ Waiting for {len(running_downloads)} remaining download(s) to finish..."
-                )
+                print(f"⏳ Waiting for {len(running_downloads)} remaining download(s) to finish...")
                 time.sleep(5)
                 _, _, slot_wait_loops, drain_loops = self._poll_running_slots(
                     running_downloads,
@@ -1627,9 +1621,7 @@ def main():
         type=float,
         default=300.0,
         metavar="SEC",
-        help=(
-            "With no partial file to track, abandon after this many seconds (default: 300)."
-        ),
+        help=("With no partial file to track, abandon after this many seconds (default: 300)."),
     )
     args = ap.parse_args()
 
@@ -1758,9 +1750,7 @@ def main():
                 tiny_preview_cooldown_seconds=args.tiny_preview_cooldown_seconds,
                 max_transient_retries=max(0, int(args.max_download_retries)),
                 vanished_partial_grace_sec=float(args.vanished_partial_grace_seconds),
-                vanished_after_progress_grace_sec=float(
-                    args.vanished_after_progress_grace_seconds
-                ),
+                vanished_after_progress_grace_sec=float(args.vanished_after_progress_grace_seconds),
                 idle_no_claim_grace_sec=float(args.idle_no_claim_grace_seconds),
             )
 

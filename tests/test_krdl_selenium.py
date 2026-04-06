@@ -402,7 +402,11 @@ class TestCanonicalEpisodeKey:
     def test_gekiranger_vs_boukenger_cross_release_key(self):
         tn = "[T-N]JyuKen_Sentai_GekiRanger_Vs_GoGo_Sentai_Boukenger[AEEFCD79]DVD.avi"
         gs = "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_VS_Boukenger_[5F1E2710].mkv"
-        assert _canonical_episode_key(tn) == _canonical_episode_key(gs) == "special:gekiranger_vs_boukenger"
+        assert (
+            _canonical_episode_key(tn)
+            == _canonical_episode_key(gs)
+            == "special:gekiranger_vs_boukenger"
+        )
 
     def test_shinkenger_tn_hd1080_mp4_matches_overtime_mkv(self):
         ot3 = "[Over-Time]_Samurai_Sentai_Shinkenger_-_03_[BD720]_[4B9A1DD2].mkv"
@@ -557,9 +561,7 @@ class TestFilterByQualityPreference:
 
 class TestFilterScrapeRowsCanonicalDedupe:
     def test_skips_avi_when_mkv_same_episode_key_on_disk(self, tmp_path: Path):
-        mk = (
-            "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_08_[aaaaaaaa].mkv",
-        )
+        mk = ("[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_08_[aaaaaaaa].mkv",)
         av = "[T-N]Jyuken_Sentai_Gekiranger_-_08[FFFFFFFF].avi"
         (tmp_path / mk[0]).write_bytes(b"x")
         rows = [
