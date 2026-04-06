@@ -20,7 +20,7 @@ How krdl-dl is structured, why it uses Selenium, and how scraping, unified episo
 - **`KrdlSeleniumDownloader`**: Chrome profile (download directory prefs), `setup_driver`, `clear_all_data` after launch, `login`, **`scrape_format_tab`** / **`scrape_all_format_tabs`**, **`download_queue`**, completion / stall / retry helpers.
 - **Pure helpers** (unit-tested without a browser):
   - `_parse_krdl_size_bytes` — table strings like `244.85 MiB`, `1.19 GiB` → integer bytes.
-  - `_canonical_episode_key` — maps a table filename to a stable key (`ep:001`, `movie`, `movie:hong_kong`, `special:…`, or `unique:…`).
+  - `_canonical_episode_key` — maps a table filename to a stable key (`ep:001`, `movie`, `movie:hong_kong`, `special:…`, or `unique:…`). Includes T-N / Blu-ray styles such as `_03_HD1080[CRC]` and `_01DC_HD1080[CRC]` so they merge with `_-_03_` / `…_03_[…]` rips from other groups.
   - **`pick_episodes_from_unified_scrape`** — one primary **`ScrapeRow`** per key from merged mkv/mp4/avi rows, plus **`ranked_by_key`** for gap-fill.
   - **`filter_scrape_rows_not_on_disk`** — basename + **canonical-key** skip across `.mkv`/`.mp4`/`.avi`.
   - **`build_gap_fill_rows`** — next-best row per key still missing on disk (non-`unique:` keys).

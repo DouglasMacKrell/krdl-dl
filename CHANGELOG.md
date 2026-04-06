@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Canonical keys** for T-N / Blu-ray MP4 names such as `…_03_HD1080[CRC]`, `…_05_HD1080Blu[CRC]`, and `…_01DC_HD1080[CRC]` now align with `…_-_03_…` / `…_03_[…]` rips (e.g. Shinkenger Over-Time MKV vs T-N MP4), preventing duplicate episodes in the queue and on disk.
+
 ## [1.2.0] - 2026-03-27
 
 ### Added

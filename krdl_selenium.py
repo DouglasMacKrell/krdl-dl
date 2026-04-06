@@ -96,6 +96,8 @@ def _release_version_counter(filename: str) -> int:
 def _canonical_episode_key(filename: str) -> str:
     """
     Map a table filename to a logical episode / special key so HD vs SD rows dedupe.
+    Covers common patterns: ``_-_NN_`` (broadcast), ``_NN_[crc]``, T-N ``_-_NN[`` / ``…NNDC_HD1080[``,
+    and ``_NN_HD…[`` Blu-ray MP4 tags (digits + optional DC + ``_HD`` + resolution + ``[``).
     Unknown shapes get a per-filename key (no cross-row dedupe).
     """
     n = _normalize_download_basename(filename)
@@ -124,8 +126,9 @@ def _canonical_episode_key(filename: str) -> str:
     m = re.search(r"(?i)_-_(\d{1,3})[A-Za-z0-9_]*\[", n)
     if m:
         return f"ep:{int(m.group(1)):03d}"
-    # "..._01_HD[CRC]7thAnniversary.mp4" and similar
-    m = re.search(r"(?i)_(\d{1,3})_HD\[", n)
+    # T-N / Blu-ray MP4: "..._03_HD1080[CRC]Blu.mp4", "..._05_HD1080Blu[CRC].mp4",
+    # "..._01DC_HD1080[CRC]BluV2.mp4", "..._01_HD[CRC]…" (_HD + digits + optional letters, then '[')
+    m = re.search(r"(?i)_(\d{1,3})(?:DC|DVD)?_HD\d*[A-Za-z]*\[", n)
     if m:
         return f"ep:{int(m.group(1)):03d}"
     m = re.search(r"(?i)_(\d{1,3})_(?:v\d+_)?\[[0-9a-fA-F]{6,12}\]", n)

@@ -404,6 +404,17 @@ class TestCanonicalEpisodeKey:
         gs = "[GS-Earthly]_Beast_Fist_Squadron_Gekiranger_VS_Boukenger_[5F1E2710].mkv"
         assert _canonical_episode_key(tn) == _canonical_episode_key(gs) == "special:gekiranger_vs_boukenger"
 
+    def test_shinkenger_tn_hd1080_mp4_matches_overtime_mkv(self):
+        ot3 = "[Over-Time]_Samurai_Sentai_Shinkenger_-_03_[BD720]_[4B9A1DD2].mkv"
+        tn3 = "[T-N]Samurai_Sentai_Shinkenger_03_HD1080[8CFE9BB3]Blu.mp4"
+        ot5 = "[Over-Time]_Samurai_Sentai_Shinkenger_-_05_[BD720]_[538E9B69].mkv"
+        tn5 = "[T-N]Samurai_Sentai_Shinkenger_05_HD1080Blu[8DA5E4D3].mp4"
+        ot1 = "[Over-Time]_Samurai_Sentai_Shinkenger_-_01_[BD720]_[9A13E173][DC].mkv"
+        tn1dc = "[T-N]Samurai_Sentai_Shinkenger_01DC_HD1080[BA8D1871]BluV2.mp4"
+        assert _canonical_episode_key(ot3) == _canonical_episode_key(tn3) == "ep:003"
+        assert _canonical_episode_key(ot5) == _canonical_episode_key(tn5) == "ep:005"
+        assert _canonical_episode_key(ot1) == _canonical_episode_key(tn1dc) == "ep:001"
+
 
 class TestIsHdFilename:
     def test_hd_tag(self):
